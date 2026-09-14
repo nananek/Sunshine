@@ -1026,9 +1026,11 @@ namespace rtsp_stream {
     if (type == "audio"sv) {
       port = net::map_port(stream::AUDIO_STREAM_PORT);
     } else if (type == "video"sv) {
-      // "streamid=video/<index>/0" names one of the streams ANNOUNCE negotiated. They all
-      // arrive on the same port -- the index in each packet's RTP extension is what
-      // separates them -- so this only has to reject an index we never agreed to.
+      // "streamid=video/<index>/0" names a video stream. SETUP comes before ANNOUNCE in the
+      // handshake, so the requested stream count is not known yet and all we can check here
+      // is that the index is one we could ever serve. ANNOUNCE then rejects a count that
+      // fails to cover what was set up. Every stream arrives on the same port; the index in
+      // each packet's RTP extension is what separates them.
       int stream_index = 0;
       if (end != std::end(target)) {
         auto index_begin = end + 1;
@@ -1039,11 +1041,13 @@ namespace rtsp_stream {
         }
       }
 
-      if (stream_index < 0 || stream_index >= session.video_stream_count) {
-        BOOST_LOG(error) << "SETUP named video stream "sv << stream_index << ", but only "sv << session.video_stream_count << " were negotiated"sv;
+      if (stream_index < 0 || stream_index >= MAX_VIDEO_STREAMS) {
+        BOOST_LOG(error) << "SETUP named video stream "sv << stream_index << ", but only 0-"sv << (MAX_VIDEO_STREAMS - 1) << " can be served"sv;
         cmd_not_found(sock, session, std::move(req));
         return;
       }
+
+      session.video_streams_setup = std::max(session.video_streams_setup, stream_index + 1);
 
       port = net::map_port(stream::VIDEO_STREAM_PORT);
     } else if (type == "control"sv) {
@@ -1172,6 +1176,14 @@ namespace rtsp_stream {
     }
     if (stream_count < 1 || stream_count > MAX_VIDEO_STREAMS) {
       BOOST_LOG(error) << "Client asked for "sv << stream_count << " video streams, but only 1-"sv << MAX_VIDEO_STREAMS << " are supported"sv;
+      respond(sock, session, &option, 400, "BAD REQUEST", req->sequenceNumber, {});
+      return;
+    }
+
+    // SETUP ran before this, so now is the first point where the two can be compared.
+    // A stream that was set up but not announced would never be configured or captured.
+    if (stream_count < session.video_streams_setup) {
+      BOOST_LOG(error) << "Client set up "sv << session.video_streams_setup << " video streams but announced only "sv << stream_count;
       respond(sock, session, &option, 400, "BAD REQUEST", req->sequenceNumber, {});
       return;
     }

@@ -38,6 +38,7 @@ namespace rtsp_stream {
     bool continuous_audio;  ///< Whether audio packets continue during silence.
     bool enable_hdr;  ///< Whether HDR streaming is requested.
     int video_stream_count {1};  ///< Number of video streams negotiated by ANNOUNCE, one per captured display.
+    int video_streams_setup {0};  ///< Highest video stream index seen in SETUP, plus one. SETUP precedes ANNOUNCE.
     bool enable_sops;  ///< Whether sequence output protection is requested.
     std::string client_name;  ///< Friendly client name from initial pairing.
 
