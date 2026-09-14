@@ -663,6 +663,7 @@ namespace video {
    * @brief Asynchronous capture thread state.
    */
   struct capture_thread_async_ctx_t {
+    std::string display_name;  ///< Display this capture thread is bound to; empty means the configured default.
     std::shared_ptr<safe::queue_t<capture_ctx_t>> capture_ctx_queue;  ///< Capture ctx queue.
     std::jthread capture_thread;  ///< Capture thread.
 
@@ -675,6 +676,7 @@ namespace video {
    * @brief Synchronous capture thread state.
    */
   struct capture_thread_sync_ctx_t {
+    std::string display_name;  ///< Display this capture thread is bound to; empty means the configured default.
     encode_session_ctx_queue_t encode_session_ctx_queue {30};  ///< Encode session ctx queue.
   };
 
@@ -705,9 +707,59 @@ namespace video {
    */
   void end_capture_async(capture_thread_async_ctx_t &ctx);
 
-  // Keep a reference counter to ensure the capture thread only runs when other threads have a reference to the capture thread
-  auto capture_thread_async = safe::make_shared<capture_thread_async_ctx_t>(start_capture_async, end_capture_async);  ///< Capture thread async.
-  auto capture_thread_sync = safe::make_shared<capture_thread_sync_ctx_t>(start_capture_sync, end_capture_sync);  ///< Capture thread sync.
+  // Capture threads are reference counted so that one only runs while some stream is using it,
+  // and they are keyed by display so that a multi-display session gets one thread per display.
+  // Streams sharing a display still share a single capture thread, as they always did.
+  //
+  // Entries are never erased: a display name maps to the same shared_t for the life of the
+  // process, so a ptr_t handed out by ref() can never outlive its owner.
+  std::mutex capture_threads_mutex;  ///< Guards the capture thread maps.
+  std::map<std::string, std::unique_ptr<safe::shared_t<capture_thread_async_ctx_t>>> capture_threads_async;  ///< Async capture thread per display.
+  std::map<std::string, std::unique_ptr<safe::shared_t<capture_thread_sync_ctx_t>>> capture_threads_sync;  ///< Sync capture thread per display.
+
+  /**
+   * @brief Get the async capture thread bound to a display, creating it if needed.
+   *
+   * @param display_name Display to capture, empty for the configured default.
+   * @return Reference counted capture thread for that display.
+   */
+  safe::shared_t<capture_thread_async_ctx_t> &capture_thread_async_for(const std::string &display_name) {
+    auto lg = std::lock_guard {capture_threads_mutex};
+
+    auto [it, inserted] = capture_threads_async.try_emplace(display_name);
+    if (inserted) {
+      it->second = std::make_unique<safe::shared_t<capture_thread_async_ctx_t>>(
+        [display_name](capture_thread_async_ctx_t &ctx) {
+          ctx.display_name = display_name;
+          return start_capture_async(ctx);
+        },
+        end_capture_async
+      );
+    }
+    return *it->second;
+  }
+
+  /**
+   * @brief Get the sync capture thread bound to a display, creating it if needed.
+   *
+   * @param display_name Display to capture, empty for the configured default.
+   * @return Reference counted capture thread for that display.
+   */
+  safe::shared_t<capture_thread_sync_ctx_t> &capture_thread_sync_for(const std::string &display_name) {
+    auto lg = std::lock_guard {capture_threads_mutex};
+
+    auto [it, inserted] = capture_threads_sync.try_emplace(display_name);
+    if (inserted) {
+      it->second = std::make_unique<safe::shared_t<capture_thread_sync_ctx_t>>(
+        [display_name](capture_thread_sync_ctx_t &ctx) {
+          ctx.display_name = display_name;
+          return start_capture_sync(ctx);
+        },
+        end_capture_sync
+      );
+    }
+    return *it->second;
+  }
 
 #ifdef _WIN32
   /**
@@ -1499,12 +1551,13 @@ namespace video {
    * @brief Update the list of display names before or during a stream.
    * @details This will attempt to keep `current_display_index` pointing at the same display.
    * @param dev_type The encoder device type used for display lookup.
+   * @param requested_output_name Display this capture thread is bound to, empty to use the configured default.
    * @param display_names The list of display names to repopulate.
    * @param current_display_index The current display index or -1 if not yet known.
    */
-  void refresh_displays(platf::mem_type_e dev_type, std::vector<std::string> &display_names, int &current_display_index) {
+  void refresh_displays(platf::mem_type_e dev_type, const std::string &requested_output_name, std::vector<std::string> &display_names, int &current_display_index) {
     // It is possible that the output name may be empty even if it wasn't before (device disconnected) or vice-versa
-    const auto output_name {display_device::map_output_name(config::video.output_name)};
+    const auto output_name {display_device::map_output_name(requested_output_name.empty() ? config::video.output_name : requested_output_name)};
     std::string current_display_name;
 
     // If we have a current display index, let's start with that
@@ -1556,12 +1609,14 @@ namespace video {
    * @param display_wp Weak pointer holder for the active display.
    * @param reinit_event Signal raised while the display is being reinitialized.
    * @param encoder Selected encoder.
+   * @param display_name Display this thread captures, empty for the configured default.
    */
   void captureThread(
     std::shared_ptr<safe::queue_t<capture_ctx_t>> capture_ctx_queue,
     sync_util::sync_t<std::weak_ptr<platf::display_t>> &display_wp,
     safe::signal_t &reinit_event,
-    const encoder_t &encoder
+    const encoder_t &encoder,
+    std::string display_name
   ) {
     std::vector<capture_ctx_t> capture_ctxs;
 
@@ -1577,6 +1632,9 @@ namespace video {
       }
     });
 
+    // TODO(multi-display): mail::switch_display is a process-wide event, so with a capture
+    // thread per display whichever thread pops it first wins. It has to move onto the
+    // per-stream mail bus before more than one stream can run.
     auto switch_display_event = mail::man->event<int>(mail::switch_display);
 
     // Wait for the initial capture context or a request to stop the queue
@@ -1590,7 +1648,7 @@ namespace video {
     // get the most up-to-date list available monitors
     std::vector<std::string> display_names;
     int display_p = -1;
-    refresh_displays(encoder.platform_formats->dev_type, display_names, display_p);
+    refresh_displays(encoder.platform_formats->dev_type, display_name, display_names, display_p);
     auto disp = platf::display(encoder.platform_formats->dev_type, display_names[display_p], capture_ctxs.front().config);
     if (!disp) {
       return;
@@ -1779,7 +1837,7 @@ namespace video {
               disp.reset();
 
               // Refresh display names since a display removal might have caused the reinitialization
-              refresh_displays(encoder.platform_formats->dev_type, display_names, display_p);
+              refresh_displays(encoder.platform_formats->dev_type, display_name, display_names, display_p);
 
               // Process any pending display switch with the new list of displays
               if (switch_display_event->peek()) {
@@ -2685,6 +2743,7 @@ namespace video {
   encode_e encode_run_sync(
     std::vector<std::unique_ptr<sync_session_ctx_t>> &synced_session_ctxs,
     encode_session_ctx_queue_t &encode_session_ctx_queue,
+    const std::string &display_name,
     std::vector<std::string> &display_names,
     int &display_p
   ) {
@@ -2692,6 +2751,9 @@ namespace video {
 
     std::shared_ptr<platf::display_t> disp;
 
+    // TODO(multi-display): mail::switch_display is a process-wide event, so with a capture
+    // thread per display whichever thread pops it first wins. It has to move onto the
+    // per-stream mail bus before more than one stream can run.
     auto switch_display_event = mail::man->event<int>(mail::switch_display);
 
     if (synced_session_ctxs.empty()) {
@@ -2705,7 +2767,7 @@ namespace video {
 
     while (encode_session_ctx_queue.running()) {
       // Refresh display names since a display removal might have caused the reinitialization
-      refresh_displays(encoder.platform_formats->dev_type, display_names, display_p);
+      refresh_displays(encoder.platform_formats->dev_type, display_name, display_names, display_p);
 
       // Process any pending display switch with the new list of displays
       if (switch_display_event->peek()) {
@@ -2836,8 +2898,8 @@ namespace video {
   /**
    * @brief Run synchronous capture and encode work on the capture thread.
    */
-  void captureThreadSync() {
-    auto ref = capture_thread_sync.ref();
+  void captureThreadSync(std::string display_name) {
+    auto ref = capture_thread_sync_for(display_name).ref();
 
     std::vector<std::unique_ptr<sync_session_ctx_t>> synced_session_ctxs;
 
@@ -2862,7 +2924,7 @@ namespace video {
 
     std::vector<std::string> display_names;
     int display_p = -1;
-    while (encode_run_sync(synced_session_ctxs, ctx, display_names, display_p) == encode_e::reinit) {}
+    while (encode_run_sync(synced_session_ctxs, ctx, display_name, display_names, display_p) == encode_e::reinit) {}
   }
 
   /**
@@ -2885,7 +2947,7 @@ namespace video {
       shutdown_event->raise(true);
     });
 
-    auto ref = capture_thread_async.ref();
+    auto ref = capture_thread_async_for(config.output_name).ref();
     if (!ref) {
       return;
     }
@@ -2977,7 +3039,7 @@ namespace video {
       capture_async(std::move(mail), config, channel_data);
     } else {
       safe::signal_t join_event;
-      auto ref = capture_thread_sync.ref();
+      auto ref = capture_thread_sync_for(config.output_name).ref();
       ref->encode_session_ctx_queue.raise(sync_session_ctx_t {
         &join_event,
         mail->event<bool>(mail::shutdown),
@@ -3661,7 +3723,8 @@ namespace video {
       capture_thread_ctx.capture_ctx_queue,
       std::ref(capture_thread_ctx.display_wp),
       std::ref(capture_thread_ctx.reinit_event),
-      std::ref(*capture_thread_ctx.encoder_p)
+      std::ref(*capture_thread_ctx.encoder_p),
+      capture_thread_ctx.display_name
     };
 
     return 0;
@@ -3680,7 +3743,7 @@ namespace video {
    * @brief Start capture sync.
    */
   int start_capture_sync(capture_thread_sync_ctx_t &ctx) {
-    std::jthread {&captureThreadSync}.detach();
+    std::jthread {&captureThreadSync, ctx.display_name}.detach();
     return 0;
   }
 
