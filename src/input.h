@@ -82,7 +82,7 @@ namespace input {
    * @param session_id Stable paired-client identity shared by launch and resume connections.
    * @return Shared input state bound to the stream mailbox.
    */
-  std::shared_ptr<input_t> alloc(safe::mail_t mail, safe::mail_t video_mail, std::string session_id);
+  std::shared_ptr<input_t> alloc(safe::mail_t mail, std::vector<safe::mail_t> video_mails, std::string session_id);
 
 #ifdef SUNSHINE_TESTS
   namespace testing {

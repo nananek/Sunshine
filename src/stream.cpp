@@ -2343,8 +2343,14 @@ namespace stream {
      * @brief Start the audio, video, and control workers for a streaming session.
      */
     int start(session_t &session, const std::string &addr_string) {
-      // TODO(multi-display): the touch port is per-stream; Phase 5 gives input one per display.
-      session.input = input::alloc(session.mail, session.video.streams.front()->mail, session.input_session_id);
+      // One touch port per display, so an absolute position can say which display it is on.
+      std::vector<safe::mail_t> video_mails;
+      video_mails.reserve(session.video.streams.size());
+      for (const auto &stream : session.video.streams) {
+        video_mails.emplace_back(stream->mail);
+      }
+
+      session.input = input::alloc(session.mail, std::move(video_mails), session.input_session_id);
 
       session.broadcast_ref = broadcast.ref();
       if (!session.broadcast_ref) {

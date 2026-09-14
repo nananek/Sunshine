@@ -265,20 +265,20 @@ namespace input {
     /**
      * @brief Construct input state from the mailbox and platform backend.
      *
-     * @param touch_port_event Event carrying the active touch port.
+     * @param touch_port_events Events carrying each video stream's touch port.
      * @param feedback_queue Queue used for controller feedback.
      */
     input_t(
-      safe::mail_raw_t::event_t<input::touch_port_t> touch_port_event,
+      std::vector<safe::mail_raw_t::event_t<input::touch_port_t>> touch_port_events,
       platf::feedback_queue_t feedback_queue
     ):
         shortcutFlags {},
         gamepads(MAX_GAMEPADS),
         client_context {platf::allocate_client_input_context(platf_input)},
-        touch_port_event {std::move(touch_port_event)},
+        touch_port_events {std::move(touch_port_events)},
         feedback_queue {std::move(feedback_queue)},
         mouse_left_button_timeout {},
-        touch_port {{0, 0, 0, 0, 0, 0}, 0, 0, 0.0f, 0.0f, 1.0f, 1.0f, 0, 0},
+        touch_ports(this->touch_port_events.size(), input::touch_port_t {{0, 0, 0, 0, 0, 0}, 0, 0, 0.0f, 0.0f, 1.0f, 1.0f, 0, 0}),
         accumulated_vscroll_delta {},
         accumulated_hscroll_delta {} {
     }
@@ -293,7 +293,7 @@ namespace input {
     std::vector<gamepad_t> gamepads;  ///< Virtual gamepad slots tracked for the stream.
     std::unique_ptr<platf::client_input_t> client_context;  ///< Client context.
 
-    safe::mail_raw_t::event_t<input::touch_port_t> touch_port_event;  ///< Touch port event.
+    std::vector<safe::mail_raw_t::event_t<input::touch_port_t>> touch_port_events;  ///< Touch port event, one per video stream.
     platf::feedback_queue_t feedback_queue;  ///< Queue used to deliver controller feedback to the platform backend.
 
     std::list<std::vector<uint8_t>> input_queue;  ///< Validated input packets waiting for processing.
@@ -301,7 +301,7 @@ namespace input {
 
     thread_pool_util::ThreadPool::task_id_t mouse_left_button_timeout;  ///< Mouse left button timeout.
 
-    input::touch_port_t touch_port;  ///< Touch coordinate bounds for the current stream.
+    std::vector<input::touch_port_t> touch_ports;  ///< Touch coordinate bounds, one per video stream.
 
     int32_t accumulated_vscroll_delta;  ///< Accumulated vscroll delta.
     int32_t accumulated_hscroll_delta;  ///< Accumulated hscroll delta.
@@ -401,8 +401,12 @@ namespace input {
    * @param input Retained input state.
    * @param mail Mailbox for the resumed stream connection.
    */
-  void rebind_input(const std::shared_ptr<input_t> &input, const safe::mail_t &mail, const safe::mail_t &video_mail) {
-    input->touch_port_event = video_mail->event<input::touch_port_t>(mail::touch_port);
+  void rebind_input(const std::shared_ptr<input_t> &input, const safe::mail_t &mail, const std::vector<safe::mail_t> &video_mails) {
+    input->touch_port_events.clear();
+    for (const auto &video_mail : video_mails) {
+      input->touch_port_events.emplace_back(video_mail->event<input::touch_port_t>(mail::touch_port));
+    }
+    input->touch_ports.resize(input->touch_port_events.size(), input::touch_port_t {{0, 0, 0, 0, 0, 0}, 0, 0, 0.0f, 0.0f, 1.0f, 1.0f, 0, 0});
     input->feedback_queue = mail->queue<platf::gamepad_feedback_msg_t>(mail::gamepad_feedback);
 
     for (int client_index = 0; client_index < input->gamepads.size(); ++client_index) {
@@ -727,11 +731,17 @@ namespace input {
    * @param input The input context.
    * @param val The cartesian coordinate pair to convert.
    * @param size The size of the client's surface containing the value.
+   * @param stream_index Which of the host's displays the surface was showing.
    * @return The host-relative coordinate pair if a touchport is available.
    */
-  std::optional<std::pair<float, float>> client_to_touchport(std::shared_ptr<input_t> &input, const std::pair<float, float> &val, const std::pair<float, float> &size) {
-    auto &touch_port_event = input->touch_port_event;
-    auto &touch_port = input->touch_port;
+  std::optional<std::pair<float, float>> client_to_touchport(std::shared_ptr<input_t> &input, const std::pair<float, float> &val, const std::pair<float, float> &size, int stream_index) {
+    if (stream_index < 0 || stream_index >= (int) input->touch_port_events.size()) {
+      BOOST_LOG(warning) << "Ignoring absolute input for video stream "sv << stream_index << ", which this session does not have"sv;
+      return std::nullopt;
+    }
+
+    auto &touch_port_event = input->touch_port_events[stream_index];
+    auto &touch_port = input->touch_ports[stream_index];
     if (touch_port_event->peek()) {
       touch_port = *touch_port_event->pop();
     }
@@ -839,12 +849,17 @@ namespace input {
     auto width = (float) util::endian::big(packet->width);
     auto height = (float) util::endian::big(packet->height);
 
-    auto tpcoords = client_to_touchport(input, {x, y}, {width, height});
+    // Which display the client was pointing at. Clients that predate multi-display send
+    // zero here, which is the stream they have always meant.
+    auto stream_index = (int) util::endian::big(packet->streamIndex);
+
+    auto tpcoords = client_to_touchport(input, {x, y}, {width, height}, stream_index);
     if (!tpcoords) {
       return;
     }
 
-    auto &touch_port = input->touch_port;
+    // client_to_touchport() already rejected an index this session does not have.
+    auto &touch_port = input->touch_ports[stream_index];
 
     int touch_port_dim_x;
     int touch_port_dim_y;
@@ -1375,16 +1390,18 @@ namespace input {
       return std::nullopt;
     }
 
+    // Pen and touch packets carry no display of their own yet, so they stay on the first.
     auto coords = client_to_touchport(
       input,
       {from_clamped_netfloat(packet->x, 0.0f, 1.0f) * 65535.f, from_clamped_netfloat(packet->y, 0.0f, 1.0f) * 65535.f},
-      {65535.f, 65535.f}
+      {65535.f, 65535.f},
+      0
     );
     if (!coords) {
       return std::nullopt;
     }
 
-    auto touch_port = monitor_touch_port(input->touch_port, *coords);
+    auto touch_port = monitor_touch_port(input->touch_ports[0], *coords);
     if (!touch_port) {
       return std::nullopt;
     }
@@ -2308,7 +2325,7 @@ namespace input {
    */
   // TODO(multi-display): one touch port per stream, so a click lands on the display
   // whose window the cursor is over. For now the caller passes stream 0's bus.
-  std::shared_ptr<input_t> alloc(safe::mail_t mail, safe::mail_t video_mail, std::string session_id) {
+  std::shared_ptr<input_t> alloc(safe::mail_t mail, std::vector<safe::mail_t> video_mails, std::string session_id) {
     std::shared_ptr<input_t> input;
     bool resumed = false;
     {
@@ -2319,8 +2336,13 @@ namespace input {
         input = iter->second;
         resumed = true;
       } else {
+        std::vector<safe::mail_raw_t::event_t<input::touch_port_t>> touch_port_events;
+        for (const auto &video_mail : video_mails) {
+          touch_port_events.emplace_back(video_mail->event<input::touch_port_t>(mail::touch_port));
+        }
+
         input = std::make_shared<input_t>(
-          video_mail->event<input::touch_port_t>(mail::touch_port),
+          std::move(touch_port_events),
           mail->queue<platf::gamepad_feedback_msg_t>(mail::gamepad_feedback)
         );
         state.inputs.try_emplace(std::move(session_id), input);
@@ -2328,8 +2350,8 @@ namespace input {
     }
 
     if (resumed) {
-      dispatch_input_task([input, mail = std::move(mail), video_mail = std::move(video_mail)]() {
-        rebind_input(input, mail, video_mail);
+      dispatch_input_task([input, mail = std::move(mail), video_mails = std::move(video_mails)]() {
+        rebind_input(input, mail, video_mails);
       });
     }
 
