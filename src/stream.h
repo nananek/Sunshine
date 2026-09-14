@@ -27,7 +27,7 @@ namespace stream {
    */
   struct config_t {
     audio::config_t audio;  ///< Audio capture configuration for the stream.
-    video::config_t monitor;  ///< Video capture and encoder configuration for the selected monitor.
+    std::vector<video::config_t> monitors;  ///< One capture and encoder configuration per requested display.
 
     int packetsize;  ///< Maximum payload size for network packets.
     int minRequiredFecPackets;  ///< Minimum recovery packets required before FEC is emitted.

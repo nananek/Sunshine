@@ -37,6 +37,7 @@ namespace rtsp_stream {
     std::string surround_params;  ///< Client-provided surround-sound layout parameters.
     bool continuous_audio;  ///< Whether audio packets continue during silence.
     bool enable_hdr;  ///< Whether HDR streaming is requested.
+    int video_stream_count {1};  ///< Number of video streams negotiated by ANNOUNCE, one per captured display.
     bool enable_sops;  ///< Whether sequence output protection is requested.
     std::string client_name;  ///< Friendly client name from initial pairing.
 

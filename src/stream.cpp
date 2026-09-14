@@ -2409,13 +2409,13 @@ namespace stream {
         false
       };
 
-      // TODO(multi-display): build one stream per requested display once the RTSP
-      // negotiation carries a per-display config list.
-      {
+      // One stream per display the client asked for in ANNOUNCE.
+      session->video.streams.reserve(config.monitors.size());
+      for (std::size_t i = 0; i < config.monitors.size(); ++i) {
         auto stream = std::make_unique<video_stream_t>();
         stream->session = session.get();
-        stream->index = 0;
-        stream->config = config.monitor;
+        stream->index = (int) i;
+        stream->config = config.monitors[i];
         stream->lowseq = 0;
         stream->mail = std::make_shared<safe::mail_raw_t>();
         stream->idr_events = stream->mail->event<bool>(mail::idr);

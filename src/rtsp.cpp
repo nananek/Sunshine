@@ -1026,6 +1026,25 @@ namespace rtsp_stream {
     if (type == "audio"sv) {
       port = net::map_port(stream::AUDIO_STREAM_PORT);
     } else if (type == "video"sv) {
+      // "streamid=video/<index>/0" names one of the streams ANNOUNCE negotiated. They all
+      // arrive on the same port -- the index in each packet's RTP extension is what
+      // separates them -- so this only has to reject an index we never agreed to.
+      int stream_index = 0;
+      if (end != std::end(target)) {
+        auto index_begin = end + 1;
+        auto index_end = std::find(index_begin, std::end(target), '/');
+        std::string_view index_str {index_begin, (size_t) std::distance(index_begin, index_end)};
+        if (!index_str.empty()) {
+          stream_index = (int) util::from_view(index_str);
+        }
+      }
+
+      if (stream_index < 0 || stream_index >= session.video_stream_count) {
+        BOOST_LOG(error) << "SETUP named video stream "sv << stream_index << ", but only "sv << session.video_stream_count << " were negotiated"sv;
+        cmd_not_found(sock, session, std::move(req));
+        return;
+      }
+
       port = net::map_port(stream::VIDEO_STREAM_PORT);
     } else if (type == "control"sv) {
       port = net::map_port(stream::CONTROL_PORT);
@@ -1123,22 +1142,41 @@ namespace rtsp_stream {
       }
     }
 
-    // Initialize any omitted parameters to defaults
-    args.try_emplace("x-nv-video[0].encoderCscMode"sv, "0"sv);
-    args.try_emplace("x-nv-vqos[0].bitStreamFormat"sv, "0"sv);
-    args.try_emplace("x-nv-video[0].dynamicRangeMode"sv, "0"sv);
+    // Session-wide parameters that a client may omit.
     args.try_emplace("x-nv-aqos.packetDuration"sv, "5"sv);
     args.try_emplace("x-nv-general.useReliableUdp"sv, "1"sv);
-    args.try_emplace("x-nv-vqos[0].fec.minRequiredFecPackets"sv, "0"sv);
     args.try_emplace("x-nv-general.featureFlags"sv, "135"sv);
     args.try_emplace("x-ml-general.featureFlags"sv, "0"sv);
-    args.try_emplace("x-nv-vqos[0].qosTrafficType"sv, "5"sv);
     args.try_emplace("x-nv-aqos.qosTrafficType"sv, "4"sv);
     args.try_emplace("x-ml-video.configuredBitrateKbps"sv, "0"sv);
     args.try_emplace("x-ss-general.encryptionEnabled"sv, "0"sv);
-    args.try_emplace("x-ss-video[0].chromaSamplingType"sv, "0"sv);
-    args.try_emplace("x-ss-video[0].intraRefresh"sv, "0"sv);
-    args.try_emplace("x-nv-video[0].clientRefreshRateX100"sv, "0"sv);
+
+    // Look up an indexed per-stream attribute, e.g. x-nv-video[1].maxFPS. Passing no
+    // fallback makes the attribute mandatory, which surfaces as a 400 like any other
+    // missing parameter.
+    auto attr = [&args](std::string_view group, int index, std::string_view field, std::optional<std::string_view> fallback = std::nullopt) -> std::string_view {
+      const auto key = std::format("{}[{}].{}", group, index, field);
+      if (auto it = args.find(key); it != std::end(args)) {
+        return it->second;
+      }
+      if (fallback) {
+        return *fallback;
+      }
+      throw std::out_of_range(key);
+    };
+
+    // A client that says nothing about stream count wants the single stream it always got.
+    int stream_count = 1;
+    if (auto it = args.find("x-ss-general.videoStreamCount"sv); it != std::end(args)) {
+      stream_count = (int) util::from_view(it->second);
+    }
+    if (stream_count < 1 || stream_count > MAX_VIDEO_STREAMS) {
+      BOOST_LOG(error) << "Client asked for "sv << stream_count << " video streams, but only 1-"sv << MAX_VIDEO_STREAMS << " are supported"sv;
+      respond(sock, session, &option, 400, "BAD REQUEST", req->sequenceNumber, {});
+      return;
+    }
+
+    session.video_stream_count = stream_count;
 
     stream::config_t config;
 
@@ -1153,11 +1191,13 @@ namespace rtsp_stream {
         util::from_view(args.at("x-nv-audio.surround.AudioQuality"sv));
 
       config.controlProtocolType = (int) util::from_view(args.at("x-nv-general.useReliableUdp"sv));
-      config.packetsize = (int) util::from_view(args.at("x-nv-video[0].packetSize"sv));
-      config.minRequiredFecPackets = (int) util::from_view(args.at("x-nv-vqos[0].fec.minRequiredFecPackets"sv));
       config.mlFeatureFlags = (int) util::from_view(args.at("x-ml-general.featureFlags"sv));
       config.audioQosType = (int) util::from_view(args.at("x-nv-aqos.qosTrafficType"sv));
-      config.videoQosType = (int) util::from_view(args.at("x-nv-vqos[0].qosTrafficType"sv));
+
+      // These are negotiated once for the session even though they are spelled with an index.
+      config.packetsize = (int) util::from_view(attr("x-nv-video", 0, "packetSize"sv));
+      config.minRequiredFecPackets = (int) util::from_view(attr("x-nv-vqos", 0, "fec.minRequiredFecPackets"sv, "0"sv));
+      config.videoQosType = (int) util::from_view(attr("x-nv-vqos", 0, "qosTrafficType"sv, "5"sv));
       config.encryptionFlagsEnabled = (uint32_t) util::from_view(args.at("x-ss-general.encryptionEnabled"sv));
 
       // Legacy clients use nvFeatureFlags to indicate support for audio encryption
@@ -1182,28 +1222,37 @@ namespace rtsp_stream {
         }
       }
 
-      config.monitor.height = (int) util::from_view(args.at("x-nv-video[0].clientViewportHt"sv));
-      config.monitor.width = (int) util::from_view(args.at("x-nv-video[0].clientViewportWd"sv));
-      config.monitor.framerate = (int) util::from_view(args.at("x-nv-video[0].maxFPS"sv));
-      config.monitor.framerateX100 = (int) util::from_view(args.at("x-nv-video[0].clientRefreshRateX100"sv));
-      // Validate framerateX100 against framerate. Some clients (e.g. Moonlight Android) send the
-      // client display's refresh rate as clientRefreshRateX100, which may differ from the requested
-      // streaming framerate. Discard framerateX100 if the derived fps is not within 1% of framerate.
-      if (config.monitor.framerateX100 > 0) {
-        double fps_strict = config.monitor.framerateX100 / 100.0;
-        double ratio = fps_strict / config.monitor.framerate;
-        if (ratio < 0.99 || ratio > 1.01) {
-          config.monitor.framerateX100 = 0;
+      config.monitors.reserve(stream_count);
+      for (int i = 0; i < stream_count; ++i) {
+        video::config_t monitor {};
+
+        monitor.height = (int) util::from_view(attr("x-nv-video", i, "clientViewportHt"sv));
+        monitor.width = (int) util::from_view(attr("x-nv-video", i, "clientViewportWd"sv));
+        monitor.framerate = (int) util::from_view(attr("x-nv-video", i, "maxFPS"sv));
+        monitor.framerateX100 = (int) util::from_view(attr("x-nv-video", i, "clientRefreshRateX100"sv, "0"sv));
+        // Validate framerateX100 against framerate. Some clients (e.g. Moonlight Android) send the
+        // client display's refresh rate as clientRefreshRateX100, which may differ from the requested
+        // streaming framerate. Discard framerateX100 if the derived fps is not within 1% of framerate.
+        if (monitor.framerateX100 > 0) {
+          double fps_strict = monitor.framerateX100 / 100.0;
+          double ratio = fps_strict / monitor.framerate;
+          if (ratio < 0.99 || ratio > 1.01) {
+            monitor.framerateX100 = 0;
+          }
         }
+        monitor.bitrate = (int) util::from_view(attr("x-nv-vqos", i, "bw.maximumBitrateKbps"sv));
+        monitor.slicesPerFrame = (int) util::from_view(attr("x-nv-video", i, "videoEncoderSlicesPerFrame"sv));
+        monitor.numRefFrames = (int) util::from_view(attr("x-nv-video", i, "maxNumReferenceFrames"sv));
+        monitor.encoderCscMode = (int) util::from_view(attr("x-nv-video", i, "encoderCscMode"sv, "0"sv));
+        monitor.videoFormat = (int) util::from_view(attr("x-nv-vqos", i, "bitStreamFormat"sv, "0"sv));
+        monitor.dynamicRange = (int) util::from_view(attr("x-nv-video", i, "dynamicRangeMode"sv, "0"sv));
+        monitor.chromaSamplingType = (int) util::from_view(attr("x-ss-video", i, "chromaSamplingType"sv, "0"sv));
+        monitor.enableIntraRefresh = (int) util::from_view(attr("x-ss-video", i, "intraRefresh"sv, "0"sv));
+        // Which host display this stream captures; empty means the configured default.
+        monitor.output_name = std::string {attr("x-ss-video", i, "outputName"sv, ""sv)};
+
+        config.monitors.emplace_back(std::move(monitor));
       }
-      config.monitor.bitrate = (int) util::from_view(args.at("x-nv-vqos[0].bw.maximumBitrateKbps"sv));
-      config.monitor.slicesPerFrame = (int) util::from_view(args.at("x-nv-video[0].videoEncoderSlicesPerFrame"sv));
-      config.monitor.numRefFrames = (int) util::from_view(args.at("x-nv-video[0].maxNumReferenceFrames"sv));
-      config.monitor.encoderCscMode = (int) util::from_view(args.at("x-nv-video[0].encoderCscMode"sv));
-      config.monitor.videoFormat = (int) util::from_view(args.at("x-nv-vqos[0].bitStreamFormat"sv));
-      config.monitor.dynamicRange = (int) util::from_view(args.at("x-nv-video[0].dynamicRangeMode"sv));
-      config.monitor.chromaSamplingType = (int) util::from_view(args.at("x-ss-video[0].chromaSamplingType"sv));
-      config.monitor.enableIntraRefresh = (int) util::from_view(args.at("x-ss-video[0].intraRefresh"sv));
 
       configuredBitrateKbps = util::from_view(args.at("x-ml-video.configuredBitrateKbps"sv));
     } catch (std::out_of_range &) {
@@ -1273,21 +1322,45 @@ namespace rtsp_stream {
       configuredBitrateKbps -= std::min((std::int64_t) 500, configuredBitrateKbps / 10);
 
       BOOST_LOG(debug) << "Final adjusted video encoding bitrate is "sv << configuredBitrateKbps << " Kbps"sv;
-      config.monitor.bitrate = (int) configuredBitrateKbps;
+
+      // The client asks for one bitrate for the whole session, so split it between the
+      // streams by pixel rate. Handing every stream the full allowance would multiply the
+      // bandwidth actually used by the number of displays.
+      double total_pixel_rate = 0;
+      for (const auto &monitor : config.monitors) {
+        total_pixel_rate += (double) monitor.width * monitor.height * monitor.framerate;
+      }
+
+      for (auto &monitor : config.monitors) {
+        const double pixel_rate = (double) monitor.width * monitor.height * monitor.framerate;
+        const double share = total_pixel_rate > 0 ?
+                               pixel_rate / total_pixel_rate :
+                               1.0 / config.monitors.size();
+
+        monitor.bitrate = (int) (configuredBitrateKbps * share + 0.5);
+
+        if (config.monitors.size() > 1) {
+          BOOST_LOG(debug) << "Stream "sv << (&monitor - config.monitors.data()) << " ("sv
+                           << monitor.width << 'x' << monitor.height << '@' << monitor.framerate
+                           << ") gets "sv << monitor.bitrate << " Kbps"sv;
+        }
+      }
     }
 
-    if (config.monitor.videoFormat == 1 && video::active_hevc_mode == 1) {
-      BOOST_LOG(warning) << "HEVC is disabled, yet the client requested HEVC"sv;
+    for (const auto &monitor : config.monitors) {
+      if (monitor.videoFormat == 1 && video::active_hevc_mode == 1) {
+        BOOST_LOG(warning) << "HEVC is disabled, yet the client requested HEVC"sv;
 
-      respond(sock, session, &option, 400, "BAD REQUEST", req->sequenceNumber, {});
-      return;
-    }
+        respond(sock, session, &option, 400, "BAD REQUEST", req->sequenceNumber, {});
+        return;
+      }
 
-    if (config.monitor.videoFormat == 2 && video::active_av1_mode == 1) {
-      BOOST_LOG(warning) << "AV1 is disabled, yet the client requested AV1"sv;
+      if (monitor.videoFormat == 2 && video::active_av1_mode == 1) {
+        BOOST_LOG(warning) << "AV1 is disabled, yet the client requested AV1"sv;
 
-      respond(sock, session, &option, 400, "BAD REQUEST", req->sequenceNumber, {});
-      return;
+        respond(sock, session, &option, 400, "BAD REQUEST", req->sequenceNumber, {});
+        return;
+      }
     }
 
     // Check that any required encryption is enabled
