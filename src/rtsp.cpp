@@ -109,6 +109,15 @@ namespace rtsp_stream {
   /**
    * @brief RTSP command handler signature used by the server dispatch table.
    */
+  /**
+   * @brief Receive buffer size for a single RTSP request.
+   * @details ANNOUNCE is by far the largest message and grows with the number of video
+   *          streams: each one adds about twenty indexed SDP attributes. 2 KB covered the
+   *          single stream GameStream allowed, so the budget is that much again for every
+   *          additional display a client may ask for.
+   */
+  constexpr std::size_t RTSP_MAX_MESSAGE_SIZE = 2048 * MAX_VIDEO_STREAMS;
+
   using cmd_func_t = std::function<void(rtsp_server_t *server, tcp::socket &, launch_session_t &, msg_t &&)>;
 
   /**
@@ -159,7 +168,7 @@ namespace rtsp_stream {
      */
     void read() {
       if (begin == std::end(msg_buf) || (session->rtsp_cipher && begin + sizeof(encrypted_rtsp_header_t) >= std::end(msg_buf))) {
-        BOOST_LOG(error) << "RTSP: read(): Exceeded maximum rtsp packet size: "sv << msg_buf.size();
+        BOOST_LOG(error) << "RTSP: read(): Exhausted the "sv << msg_buf.size() << " byte receive buffer"sv;
 
         respond(sock, *session, nullptr, 400, "BAD REQUEST", 0, {});
 
@@ -222,7 +231,9 @@ namespace rtsp_stream {
 
       // Check if we have enough space to read this message
       if (socket->begin + sizeof(*header) + payload_length >= std::end(socket->msg_buf)) {
-        BOOST_LOG(error) << "RTSP: handle_read_encrypted_header(): Exceeded maximum rtsp packet size: "sv << socket->msg_buf.size();
+        BOOST_LOG(error) << "RTSP: handle_read_encrypted_header(): Message needs "sv << (sizeof(*header) + payload_length)
+                         << " bytes but only "sv << (std::end(socket->msg_buf) - socket->begin) << " are left of a "sv
+                         << socket->msg_buf.size() << " byte buffer"sv;
 
         respond(socket->sock, *socket->session, nullptr, 400, "BAD REQUEST", 0, {});
         return;
@@ -304,7 +315,7 @@ namespace rtsp_stream {
      */
     void read_plaintext_payload() {
       if (begin == std::end(msg_buf)) {
-        BOOST_LOG(error) << "RTSP: read_plaintext_payload(): Exceeded maximum rtsp packet size: "sv << msg_buf.size();
+        BOOST_LOG(error) << "RTSP: read_plaintext_payload(): Exhausted the "sv << msg_buf.size() << " byte receive buffer"sv;
 
         respond(sock, *session, nullptr, 400, "BAD REQUEST", 0, {});
 
@@ -456,7 +467,7 @@ namespace rtsp_stream {
 
     tcp::socket sock;  ///< TCP socket connected to the RTSP client.
 
-    std::array<char, 2048> msg_buf;  ///< Receive buffer for one RTSP request header and payload.
+    std::array<char, RTSP_MAX_MESSAGE_SIZE> msg_buf;  ///< Receive buffer for one RTSP request header and payload.
 
     char *crlf;  ///< Pointer to the next CRLF delimiter while parsing the receive buffer.
     char *begin = msg_buf.data();  ///< Start of the unparsed data currently in `msg_buf`.
