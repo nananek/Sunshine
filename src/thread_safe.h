@@ -705,8 +705,11 @@ namespace safe {
       std::lock_guard lg {_lock};
 
       if (!_count) {
-        new (_object_buf.data()) element_type;
-        if (_construct(*reinterpret_cast<element_type *>(_object_buf.data())) != 0) {
+        auto *object = new (_object_buf.data()) element_type;
+        if (_construct(*object) != 0) {
+          // Undo the placement new. Leaving it would have the next ref() construct a
+          // second object over the top of this one, since _count stays zero.
+          object->~element_type();
           return ptr_t {nullptr};
         }
       }
@@ -722,7 +725,10 @@ namespace safe {
 
     std::array<std::uint8_t, sizeof(element_type)> _object_buf;
 
-    std::uint32_t _count;
+    // Must be initialized here: a shared_t with static storage duration would be zeroed
+    // anyway, but one on the heap would start with whatever the allocator handed back,
+    // and a non-zero count skips the placement new that constructs _object_buf.
+    std::uint32_t _count {0};
     std::mutex _lock;
   };
 
