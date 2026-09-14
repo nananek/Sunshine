@@ -354,10 +354,10 @@ namespace kwin {
     }
 
     /**
-     * @brief Generate a sorted list of known output names.
-     * @return List of strings with output names to pass to start()
+     * @brief Generate a sorted list of known outputs with their geometry.
+     * @return List of outputs in the order a client should lay them out.
      */
-    std::vector<std::string> get_output_names() {
+    std::vector<platf::display_info_t> get_output_infos() {
       std::vector<std::shared_ptr<output_parameter_t>> sorted_outputs;
       for (const auto &output_parameter : outputs | std::views::values) {
         output_parameter->order = get_order_for_output_name(output_parameter->name);
@@ -366,10 +366,29 @@ namespace kwin {
       std::ranges::sort(sorted_outputs, [](const auto &a, const auto &b) {
         return a->order < b->order || a->pos_x < b->pos_x || a->pos_y < b->pos_y;
       });
-      std::vector<std::string> output_names;
+      std::vector<platf::display_info_t> infos;
       for (const auto &output_parameter : sorted_outputs) {
         BOOST_LOG(info) << "[kwingrab] Found output: "sv << output_parameter->name << " order: "sv << output_parameter->order << " position: "sv << output_parameter->pos_x << "x"sv << output_parameter->pos_y << " resolution: "sv << output_parameter->width << "x"sv << output_parameter->height;
-        output_names.emplace_back(output_parameter->name);
+        infos.push_back(platf::display_info_t {
+          // KWin reports no model string, so the name is all a client gets to show.
+          .name = output_parameter->name,
+          .width = output_parameter->width,
+          .height = output_parameter->height,
+          .offset_x = output_parameter->pos_x,
+          .offset_y = output_parameter->pos_y,
+        });
+      }
+      return infos;
+    }
+
+    /**
+     * @brief Generate a sorted list of known output names.
+     * @return List of strings with output names to pass to start()
+     */
+    std::vector<std::string> get_output_names() {
+      std::vector<std::string> output_names;
+      for (auto &info : get_output_infos()) {
+        output_names.emplace_back(std::move(info.name));
       }
       return output_names;
     }
@@ -737,24 +756,35 @@ namespace platf {
   }
 
   /**
-   * @brief Enumerate KWin screencast display names.
+   * @brief Enumerate KWin screencast displays with their geometry.
    *
-   * @return KWin display names, or an empty list when KWin capture is unavailable.
+   * @return KWin displays, or an empty list when KWin capture is unavailable.
    */
-  std::vector<std::string> kwin_display_names() {
+  std::vector<display_info_t> kwin_display_infos() {
     if (has_elevated_privileges(false)) {
       // We're still in the probing phase of Sunshine startup. Dropping portal security early will break KMS.
       // Just return a dummy screen for now. Display re-enumeration after encoder probing will yield full result.
-      std::vector<std::string> display_names;
-      display_names.emplace_back("");
-      return display_names;
+      return {display_info_t {}};
     }
 
     const auto screencast = std::make_unique<kwin::screencast_t>();
     if (screencast->init() < 0) {
       return {};
     }
-    return screencast->get_output_names();
+    return screencast->get_output_infos();
+  }
+
+  /**
+   * @brief Enumerate KWin screencast display names.
+   *
+   * @return KWin display names, or an empty list when KWin capture is unavailable.
+   */
+  std::vector<std::string> kwin_display_names() {
+    std::vector<std::string> display_names;
+    for (auto &info : kwin_display_infos()) {
+      display_names.emplace_back(std::move(info.name));
+    }
+    return display_names;
   }
 
   /**

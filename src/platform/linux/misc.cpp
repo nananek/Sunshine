@@ -1227,6 +1227,7 @@ namespace platf {
 #ifdef SUNSHINE_BUILD_KWIN
   bool kwin_available();
   std::vector<std::string> kwin_display_names();
+  std::vector<display_info_t> kwin_display_infos();
   std::shared_ptr<display_t> kwin_display(mem_type_e hwdevice_type, const std::string &display_name, const video::config_t &config);
 
   bool verify_kwin() {
@@ -1236,16 +1237,49 @@ namespace platf {
 #endif
 
   /**
+   * @brief Turn a name-only enumeration into display entries.
+   * @details Used for the backends that report nothing but a capture selector. The
+   *          geometry is left at zero rather than guessed, which a client reads as
+   *          "unknown" -- the name alone is still enough to ask for that display.
+   */
+  namespace {
+    std::vector<display_info_t> names_to_infos(std::vector<std::string> names) {
+      std::vector<display_info_t> infos;
+      infos.reserve(names.size());
+      for (auto &name : names) {
+        infos.push_back(display_info_t {.name = std::move(name)});
+      }
+      return infos;
+    }
+  }  // namespace
+
+  /**
    * @brief List the capturable displays along with their geometry.
-   * @details The Wayland and portal backends already work the geometry out while
-   *          enumerating, so those report it. The rest fall through to display_names()
-   *          and return name-only entries, which is still enough for a client to ask
-   *          for a particular display.
+   * @details This is the one place that picks a capture backend to enumerate, so
+   *          display_names() cannot drift out of step with it. The Wayland, portal
+   *          and KWin backends work the geometry out while enumerating and report
+   *          it; the rest return name-only entries.
    */
   std::vector<display_info_t> display_infos(mem_type_e hwdevice_type) {
+#ifdef SUNSHINE_BUILD_CUDA
+    // display using NvFBC only supports mem_type_e::cuda
+    if (sources[source::NVFBC] && hwdevice_type == mem_type_e::cuda) {
+      return names_to_infos(nvfbc_display_names());
+    }
+#endif
 #ifdef SUNSHINE_BUILD_WAYLAND
     if (sources[source::WAYLAND]) {
       return wl_display_infos();
+    }
+#endif
+#ifdef SUNSHINE_BUILD_DRM
+    if (sources[source::KMS]) {
+      return names_to_infos(kms_display_names(hwdevice_type));
+    }
+#endif
+#ifdef SUNSHINE_BUILD_X11
+    if (sources[source::X11]) {
+      return names_to_infos(x11_display_names());
     }
 #endif
 #ifdef SUNSHINE_BUILD_PORTAL
@@ -1253,50 +1287,23 @@ namespace platf {
       return portal_display_infos();
     }
 #endif
-
-    std::vector<display_info_t> infos;
-    for (auto &name : display_names(hwdevice_type)) {
-      infos.push_back(display_info_t {.name = std::move(name)});
+#ifdef SUNSHINE_BUILD_KWIN
+    if (sources[source::KWIN]) {
+      return kwin_display_infos();
     }
-    return infos;
+#endif
+    return {};
   }
 
   /**
    * @brief List display names accepted by the selected capture backend.
    */
   std::vector<std::string> display_names(mem_type_e hwdevice_type) {
-#ifdef SUNSHINE_BUILD_CUDA
-    // display using NvFBC only supports mem_type_e::cuda
-    if (sources[source::NVFBC] && hwdevice_type == mem_type_e::cuda) {
-      return nvfbc_display_names();
+    std::vector<std::string> names;
+    for (auto &info : display_infos(hwdevice_type)) {
+      names.emplace_back(std::move(info.name));
     }
-#endif
-#ifdef SUNSHINE_BUILD_WAYLAND
-    if (sources[source::WAYLAND]) {
-      return wl_display_names();
-    }
-#endif
-#ifdef SUNSHINE_BUILD_DRM
-    if (sources[source::KMS]) {
-      return kms_display_names(hwdevice_type);
-    }
-#endif
-#ifdef SUNSHINE_BUILD_X11
-    if (sources[source::X11]) {
-      return x11_display_names();
-    }
-#endif
-#ifdef SUNSHINE_BUILD_PORTAL
-    if (sources[source::PORTAL]) {
-      return portal_display_names();
-    }
-#endif
-#ifdef SUNSHINE_BUILD_KWIN
-    if (sources[source::KWIN]) {
-      return kwin_display_names();
-    }
-#endif
-    return {};
+    return names;
   }
 
   /**
