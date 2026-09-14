@@ -401,8 +401,8 @@ namespace input {
    * @param input Retained input state.
    * @param mail Mailbox for the resumed stream connection.
    */
-  void rebind_input(const std::shared_ptr<input_t> &input, const safe::mail_t &mail) {
-    input->touch_port_event = mail->event<input::touch_port_t>(mail::touch_port);
+  void rebind_input(const std::shared_ptr<input_t> &input, const safe::mail_t &mail, const safe::mail_t &video_mail) {
+    input->touch_port_event = video_mail->event<input::touch_port_t>(mail::touch_port);
     input->feedback_queue = mail->queue<platf::gamepad_feedback_msg_t>(mail::gamepad_feedback);
 
     for (int client_index = 0; client_index < input->gamepads.size(); ++client_index) {
@@ -2306,7 +2306,9 @@ namespace input {
   /**
    * @brief Allocate and initialize platform input state for a stream.
    */
-  std::shared_ptr<input_t> alloc(safe::mail_t mail, std::string session_id) {
+  // TODO(multi-display): one touch port per stream, so a click lands on the display
+  // whose window the cursor is over. For now the caller passes stream 0's bus.
+  std::shared_ptr<input_t> alloc(safe::mail_t mail, safe::mail_t video_mail, std::string session_id) {
     std::shared_ptr<input_t> input;
     bool resumed = false;
     {
@@ -2318,7 +2320,7 @@ namespace input {
         resumed = true;
       } else {
         input = std::make_shared<input_t>(
-          mail->event<input::touch_port_t>(mail::touch_port),
+          video_mail->event<input::touch_port_t>(mail::touch_port),
           mail->queue<platf::gamepad_feedback_msg_t>(mail::gamepad_feedback)
         );
         state.inputs.try_emplace(std::move(session_id), input);
@@ -2326,8 +2328,8 @@ namespace input {
     }
 
     if (resumed) {
-      dispatch_input_task([input, mail = std::move(mail)]() {
-        rebind_input(input, mail);
+      dispatch_input_task([input, mail = std::move(mail), video_mail = std::move(video_mail)]() {
+        rebind_input(input, mail, video_mail);
       });
     }
 

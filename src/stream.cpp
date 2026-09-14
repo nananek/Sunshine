@@ -486,6 +486,33 @@ namespace stream {
   /**
    * @brief Runtime state for one audio/video streaming session.
    */
+  struct session_t;
+
+  /**
+   * @brief One video stream within a session; a multi-display session has one per display.
+   * @details Packets carry a pointer to this as their channel data, which is how the
+   *          shared broadcast thread knows which stream (and session) a frame came from.
+   */
+  struct video_stream_t {
+    session_t *session;  ///< Session that owns this stream.
+    int index;  ///< Index of this stream within the session, as sent on the wire.
+
+    video::config_t config;  ///< Capture and encoder configuration for this stream's display.
+
+    /**
+     * @brief Mail bus private to this stream.
+     * @details Each stream raises its own idr/hdr/touch_port events, so they cannot share one bus.
+     *          The session's shutdown is forwarded onto this bus by videoThread().
+     */
+    safe::mail_t mail;
+
+    int lowseq;  ///< Next base sequence number for this stream's RTP packets.
+    safe::mail_raw_t::event_t<bool> idr_events;  ///< Event requesting an instantaneous decoder refresh frame.
+    safe::mail_raw_t::event_t<std::pair<int64_t, int64_t>> invalidate_ref_frames_events;  ///< Event carrying the reference-frame range to invalidate.
+
+    std::jthread thread;  ///< Capture and encode thread for this stream.
+  };
+
   struct session_t {
     config_t config;  ///< Stream or encoder configuration captured for the worker.
 
@@ -503,19 +530,20 @@ namespace stream {
     boost::asio::ip::address localAddress;  ///< Local address.
 
     struct {
+      // Every stream is multiplexed onto one UDP socket, so the peer, the ping payload
+      // and the QoS binding belong to the session rather than to any one stream. The
+      // cipher and its IV counter are shared too: a single counter is what guarantees
+      // the streams never reuse an IV, and only the broadcast thread touches it.
       std::string ping_payload;  ///< Payload expected from video-channel ping packets.
-
-      int lowseq;  ///< Next base sequence number for video RTP packets.
       udp::endpoint peer;  ///< Client UDP endpoint for the video channel.
 
       std::optional<crypto::cipher::gcm_t> cipher;  ///< Optional AES-GCM cipher for encrypted video packets.
       std::uint64_t gcm_iv_counter;  ///< Counter incorporated into video AES-GCM initialization vectors.
 
-      safe::mail_raw_t::event_t<bool> idr_events;  ///< Event requesting an instantaneous decoder refresh frame.
-      safe::mail_raw_t::event_t<std::pair<int64_t, int64_t>> invalidate_ref_frames_events;  ///< Event carrying the reference-frame range to invalidate.
-
       std::unique_ptr<platf::deinit_t> qos;  ///< Lifetime guard for video-socket QoS configuration.
-    } video;  ///< Video worker thread state for the active stream.
+
+      std::vector<std::unique_ptr<video_stream_t>> streams;  ///< One entry per captured display.
+    } video;  ///< Video worker state for the active session.
 
     struct {
       crypto::cipher::cbc_t cipher;  ///< AES-CBC cipher used for audio-packet encryption.
@@ -1193,7 +1221,11 @@ namespace stream {
     server->map(packetTypes[IDX_REQUEST_IDR_FRAME], [&](session_t *session, const std::string_view &payload) {
       BOOST_LOG(debug) << "type [IDX_REQUEST_IDR_FRAME]"sv;
 
-      session->video.idr_events->raise(true);
+      // TODO(multi-display): the control protocol carries no stream index on an IDR
+      // request yet, so refresh every stream. This matches what the client assumes.
+      for (auto &stream : session->video.streams) {
+        stream->idr_events->raise(true);
+      }
     });
 
     server->map(packetTypes[IDX_INVALIDATE_REF_FRAMES], [&](session_t *session, const std::string_view &payload) {
@@ -1206,7 +1238,10 @@ namespace stream {
         << "firstFrame [" << firstFrame << ']' << std::endl
         << "lastFrame [" << lastFrame << ']';
 
-      session->video.invalidate_ref_frames_events->raise(std::make_pair(firstFrame, lastFrame));
+      // TODO(multi-display): likewise, reference frame invalidation is session-wide on the wire.
+      for (auto &stream : session->video.streams) {
+        stream->invalidate_ref_frames_events->raise(std::make_pair(firstFrame, lastFrame));
+      }
     });
 
     server->map(packetTypes[IDX_INPUT_DATA], [&](session_t *session, const std::string_view &payload) {
@@ -1552,8 +1587,9 @@ namespace stream {
 
       frame_network_latency_logger.first_point_now();
 
-      auto session = (session_t *) packet->channel_data;
-      auto lowseq = session->video.lowseq;
+      auto stream = (video_stream_t *) packet->channel_data;
+      auto session = stream->session;
+      auto lowseq = stream->lowseq;
 
       std::string_view payload {(char *) packet->data(), packet->data_size()};
       std::vector<uint8_t> payload_with_replacements;
@@ -1832,7 +1868,7 @@ namespace stream {
           lowseq += shards.size();
         });
 
-        session->video.lowseq = lowseq;
+        stream->lowseq = lowseq;
       } catch (const std::exception &e) {
         BOOST_LOG(error) << "Broadcast video failed "sv << e.what();
         std::this_thread::sleep_for(100ms);
@@ -2128,6 +2164,21 @@ namespace stream {
    *
    * @param session Active streaming or pairing session for the request.
    */
+  void videoStreamThread(video_stream_t *stream) {
+    platf::set_thread_name("session::video");
+    auto fg = util::fail_guard([&]() {
+      // A capture thread that exits on its own ends the session, as it always has.
+      session::stop(*stream->session);
+    });
+
+    video::capture(stream->mail, stream->config, stream);
+  }
+
+  /**
+   * @brief Wait for the client's video ping, then run a capture thread per stream.
+   *
+   * @param session Active streaming session.
+   */
   void videoThread(session_t *session) {
     platf::set_thread_name("session::video");
     auto fg = util::fail_guard([&]() {
@@ -2147,7 +2198,24 @@ namespace stream {
     session->video.qos = platf::enable_socket_qos(ref->video_sock.native_handle(), address, session->video.peer.port(), platf::qos_data_type_e::video, session->config.videoQosType != 0);
 
     BOOST_LOG(debug) << "Start capturing Video"sv;
-    video::capture(session->mail, session->config.monitor, session);
+
+    // Each stream captures its own display on its own thread. The session's shutdown is
+    // forwarded onto each stream's mail bus, and a stream that dies early stops the
+    // session, which is what unblocks the wait below.
+    for (auto &stream : session->video.streams) {
+      stream->thread = std::jthread {videoStreamThread, stream.get()};
+    }
+
+    session->shutdown_event->view();
+
+    for (auto &stream : session->video.streams) {
+      stream->mail->event<bool>(mail::shutdown)->raise(true);
+    }
+    for (auto &stream : session->video.streams) {
+      if (stream->thread.joinable()) {
+        stream->thread.join();
+      }
+    }
   }
 
   /**
@@ -2263,7 +2331,8 @@ namespace stream {
      * @brief Start the audio, video, and control workers for a streaming session.
      */
     int start(session_t &session, const std::string &addr_string) {
-      session.input = input::alloc(session.mail, session.input_session_id);
+      // TODO(multi-display): the touch port is per-stream; Phase 5 gives input one per display.
+      session.input = input::alloc(session.mail, session.video.streams.front()->mail, session.input_session_id);
 
       session.broadcast_ref = broadcast.ref();
       if (!session.broadcast_ref) {
@@ -2321,16 +2390,31 @@ namespace stream {
 
       session->control.connect_data = launch_session.control_connect_data;
       session->control.feedback_queue = mail->queue<platf::gamepad_feedback_msg_t>(mail::gamepad_feedback);
-      session->control.hdr_queue = mail->event<video::hdr_info_t>(mail::hdr);
+      // Bound below, once the video streams exist, because HDR metadata is raised per stream.
       session->control.legacy_input_enc_iv = launch_session.iv;
       session->control.cipher = crypto::cipher::gcm_t {
         launch_session.gcm_key,
         false
       };
 
-      session->video.idr_events = mail->event<bool>(mail::idr);
-      session->video.invalidate_ref_frames_events = mail->event<std::pair<int64_t, int64_t>>(mail::invalidate_ref_frames);
-      session->video.lowseq = 0;
+      // TODO(multi-display): build one stream per requested display once the RTSP
+      // negotiation carries a per-display config list.
+      {
+        auto stream = std::make_unique<video_stream_t>();
+        stream->session = session.get();
+        stream->index = 0;
+        stream->config = config.monitor;
+        stream->lowseq = 0;
+        stream->mail = std::make_shared<safe::mail_raw_t>();
+        stream->idr_events = stream->mail->event<bool>(mail::idr);
+        stream->invalidate_ref_frames_events = stream->mail->event<std::pair<int64_t, int64_t>>(mail::invalidate_ref_frames);
+        session->video.streams.emplace_back(std::move(stream));
+      }
+
+      // TODO(multi-display): HDR is negotiated per stream, but the control message has no
+      // stream index yet, so the control thread watches stream 0.
+      session->control.hdr_queue = session->video.streams.front()->mail->event<video::hdr_info_t>(mail::hdr);
+
       session->video.ping_payload = launch_session.av_ping_payload;
       if (config.encryptionFlagsEnabled & SS_ENC_VIDEO) {
         BOOST_LOG(info) << "Video encryption enabled"sv;

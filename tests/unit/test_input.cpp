@@ -212,7 +212,7 @@ TEST_F(InputGamepadSessionTest, RejectsMalformedBatchablePacketsAtQueueIngress) 
   const std::shared_ptr<input::input_t> empty_input;
   EXPECT_EQ(input::testing::queued_input_packet_count(empty_input), 0);
 
-  auto stream_input = input::alloc(std::make_shared<safe::mail_raw_t>(), "packet-validation-client");
+  auto stream_input = input::alloc(std::make_shared<safe::mail_raw_t>(), std::make_shared<safe::mail_raw_t>(), "packet-validation-client");
   ASSERT_NE(stream_input, nullptr);
 
   auto short_header = make_input_packet(SS_PEN_MAGIC, sizeof(std::uint32_t), sizeof(NV_INPUT_HEADER) - 1);
@@ -253,7 +253,7 @@ TEST_F(InputGamepadSessionTest, RejectsMalformedBatchablePacketsAtQueueIngress) 
 TEST_F(InputGamepadSessionTest, ReusesGamepadsAcrossPauseAndDestroysThemOnTermination) {
   const std::string session_id = "paired-client-certificate";
   auto first_mail = std::make_shared<safe::mail_raw_t>();
-  auto first = input::alloc(first_mail, session_id);
+  auto first = input::alloc(first_mail, first_mail, session_id);
   ASSERT_NE(first, nullptr);
   const auto active_devices_before_gamepad = runtime().active_device_count();
 
@@ -268,7 +268,7 @@ TEST_F(InputGamepadSessionTest, ReusesGamepadsAcrossPauseAndDestroysThemOnTermin
   EXPECT_EQ(runtime().active_device_count(), active_devices_before_gamepad + 1);
 
   auto resumed_mail = std::make_shared<safe::mail_raw_t>();
-  auto resumed = input::alloc(resumed_mail, session_id);
+  auto resumed = input::alloc(resumed_mail, resumed_mail, session_id);
   ASSERT_NE(resumed, nullptr);
   EXPECT_EQ(paused.lock(), resumed);
   EXPECT_EQ(input::testing::gamepad_id(resumed, 0), original_id);
@@ -278,7 +278,7 @@ TEST_F(InputGamepadSessionTest, ReusesGamepadsAcrossPauseAndDestroysThemOnTermin
   EXPECT_EQ(input::testing::gamepad_id(resumed, 0), -1);
   EXPECT_EQ(runtime().active_device_count(), active_devices_before_gamepad);
 
-  auto replacement = input::alloc(std::make_shared<safe::mail_raw_t>(), session_id);
+  auto replacement = input::alloc(std::make_shared<safe::mail_raw_t>(), std::make_shared<safe::mail_raw_t>(), session_id);
   EXPECT_NE(replacement, resumed);
 }
 
