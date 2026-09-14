@@ -8,11 +8,13 @@
 // standard includes
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <filesystem>
 #include <format>
 #include <mutex>
 #include <string>
 #include <utility>
+#include <variant>
 
 // lib includes
 #include <boost/asio/ssl/context.hpp>
@@ -42,6 +44,22 @@
 using namespace std::literals;
 
 namespace nvhttp {
+
+  namespace {
+    /**
+     * @brief Collapse a libdisplaydevice floating point value to a double.
+     *
+     * @param value Either a double or an exact rational (e.g. 60000/1001 for 59.94 Hz).
+     * @return The value as a double, or 0 when a rational has no denominator.
+     */
+    double to_double(const display_device::FloatingPoint &value) {
+      if (const auto *exact = std::get_if<display_device::Rational>(&value)) {
+        return exact->m_denominator == 0 ? 0.0 : static_cast<double>(exact->m_numerator) / exact->m_denominator;
+      }
+      return std::get<double>(value);
+    }
+  }  // namespace
+
 
   static constexpr std::string_view EMPTY_PROPERTY_TREE_ERROR_MSG = "Property tree is empty. Probably, control flow got interrupted by an unexpected C++ exception. This is a bug in Sunshine. Moonlight-qt will report Malformed XML (missing root element)."sv;
 
@@ -1265,6 +1283,40 @@ namespace nvhttp {
     tree.put("root.PairStatus", pair_status);
     tree.put("root.currentgame", current_appid);
     tree.put("root.state", current_appid > 0 ? "SUNSHINE_SERVER_BUSY" : "SUNSHINE_SERVER_FREE");
+
+    // Describe the displays we can capture so a client can ask for several at once and lay
+    // its windows out the way the host's desktop is arranged. Only active displays are listed,
+    // since an inactive one cannot be captured.
+    tree.put("root.MaxVideoStreams", MAX_VIDEO_STREAMS);
+    {
+      pt::ptree displays_node;
+      int display_index = 0;
+
+      for (const auto &device : display_device::enumerate_devices()) {
+        if (!device.m_info) {
+          continue;
+        }
+
+        const auto &info = *device.m_info;
+
+        pt::ptree display_node;
+        display_node.put("Index", display_index++);
+        // The name a client echoes back in x-ss-video[i].outputName to pick this display.
+        display_node.put("Name", device.m_display_name);
+        display_node.put("FriendlyName", device.m_friendly_name);
+        display_node.put("Width", info.m_resolution.m_width);
+        display_node.put("Height", info.m_resolution.m_height);
+        display_node.put("RefreshRateX100", static_cast<int>(std::lround(to_double(info.m_refresh_rate) * 100)));
+        // Desktop position, which is what lets the client mirror the host's monitor layout.
+        display_node.put("PosX", info.m_origin_point.m_x);
+        display_node.put("PosY", info.m_origin_point.m_y);
+        display_node.put("Primary", info.m_primary ? 1 : 0);
+
+        displays_node.add_child("Display", display_node);
+      }
+
+      tree.add_child("root.Displays", displays_node);
+    }
 
     std::ostringstream data;
 
