@@ -52,6 +52,34 @@ namespace nvhttp {
      * @param value Either a double or an exact rational (e.g. 60000/1001 for 59.94 Hz).
      * @return The value as a double, or 0 when a rational has no denominator.
      */
+    /**
+     * @brief Capturable displays, cached because /serverinfo is polled.
+     * @details The Linux fallback opens a portal session and does a D-Bus round trip, far
+     *          too much to repeat on every poll. Displays only change on hotplug, and a
+     *          stream start re-enumerates through its own path, so a short TTL notices a
+     *          change without the churn. The lock is held across the enumeration on
+     *          purpose: concurrent requests should wait rather than open two sessions.
+     *
+     * @return The capturable displays, refreshed at most once per TTL.
+     */
+    std::vector<platf::display_info_t> cached_display_infos() {
+      constexpr auto ttl = std::chrono::seconds(30);
+
+      static std::mutex mutex;
+      static std::vector<platf::display_info_t> cache;
+      static std::chrono::steady_clock::time_point expiry;
+
+      auto lg = std::lock_guard {mutex};
+
+      const auto now = std::chrono::steady_clock::now();
+      if (now >= expiry) {
+        cache = platf::display_infos(platf::mem_type_e::unknown);
+        expiry = now + ttl;
+      }
+
+      return cache;
+    }
+
     double to_double(const display_device::FloatingPoint &value) {
       if (const auto *exact = std::get_if<display_device::Rational>(&value)) {
         return exact->m_denominator == 0 ? 0.0 : static_cast<double>(exact->m_numerator) / exact->m_denominator;
@@ -1313,6 +1341,30 @@ namespace nvhttp {
         display_node.put("Primary", info.m_primary ? 1 : 0);
 
         displays_node.add_child("Display", display_node);
+      }
+
+      // display_device has no Linux implementation, so enumerate_devices() is always empty
+      // there. Fall back to asking the capture backend, which is the authority on what can
+      // actually be captured and on the names platf::display() accepts anyway.
+      if (display_index == 0) {
+        for (const auto &info : cached_display_infos()) {
+          pt::ptree display_node;
+          display_node.put("Index", display_index++);
+          display_node.put("Name", info.name);
+          display_node.put("FriendlyName", info.description.empty() ? info.name : info.description);
+
+          // A Display element has the same shape on every platform. Fields a backend does
+          // not report are zero, which means "unknown" rather than a real measurement --
+          // no Linux capture backend knows which display the desktop calls primary.
+          display_node.put("Width", info.width);
+          display_node.put("Height", info.height);
+          display_node.put("RefreshRateX100", info.refresh_rate_x100);
+          display_node.put("PosX", info.offset_x);
+          display_node.put("PosY", info.offset_y);
+          display_node.put("Primary", 0);
+
+          displays_node.add_child("Display", display_node);
+        }
       }
 
       tree.add_child("root.Displays", displays_node);

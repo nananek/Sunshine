@@ -528,8 +528,8 @@ namespace platf {
   /**
    * @brief Enumerate capture display names reported by the Wayland compositor.
    */
-  std::vector<std::string> wl_display_names() {
-    std::vector<std::string> display_names;
+  std::vector<display_info_t> wl_display_infos() {
+    std::vector<display_info_t> infos;
 
     wl::display_t display;
     if (display.init()) {
@@ -570,11 +570,33 @@ namespace platf {
 
       BOOST_LOG(info) << "[wlgrab] Monitor " << x << " is "sv << monitor->name << ": "sv << monitor->description;
 
-      display_names.emplace_back(monitor->name.empty() ? std::to_string(x) : monitor->name);
+      infos.push_back(display_info_t {
+        .name = monitor->name.empty() ? std::to_string(x) : monitor->name,
+        .description = monitor->description,
+        .width = monitor->viewport.width,
+        .height = monitor->viewport.height,
+        .offset_x = monitor->viewport.offset_x,
+        .offset_y = monitor->viewport.offset_y,
+        // wl_output reports mHz; RefreshRateX100 wants hundredths of a Hz.
+        .refresh_rate_x100 = monitor->refresh_mhz / 10,
+      });
     }
 
     BOOST_LOG(info) << "[wlgrab] --------- End of Wayland monitor list ---------"sv;
 
+    return infos;
+  }
+
+  /**
+   * @brief Enumerate the Wayland outputs available for capture.
+   *
+   * @return Names accepted as a capture selector.
+   */
+  std::vector<std::string> wl_display_names() {
+    std::vector<std::string> display_names;
+    for (auto &info : wl_display_infos()) {
+      display_names.emplace_back(std::move(info.name));
+    }
     return display_names;
   }
 

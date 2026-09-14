@@ -1050,6 +1050,22 @@ namespace platf {
     return nullptr;
   }
 
+  /**
+   * @brief List capturable displays.
+   * @details This platform reports geometry through display_device::enumerate_devices(),
+   *          so the entries here carry only the capture selector.
+   *
+   * @param hwdevice_type Hardware device type requested for capture or encode.
+   * @return One name-only entry per display.
+   */
+  std::vector<display_info_t> display_infos(mem_type_e hwdevice_type) {
+    std::vector<display_info_t> infos;
+    for (auto &name : display_names(hwdevice_type)) {
+      infos.push_back(display_info_t {.name = std::move(name)});
+    }
+    return infos;
+  }
+
   std::vector<std::string> display_names(mem_type_e) {
     std::vector<std::string> display_names;
 

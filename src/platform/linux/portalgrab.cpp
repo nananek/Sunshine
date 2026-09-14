@@ -124,6 +124,8 @@ namespace portal {
     int pos_x = 0;  ///< Output X position reported by the portal.
     int pos_y = 0;  ///< Output Y position reported by the portal.
     std::string monitor_name;  ///< Monitor name.
+    std::string monitor_description;  ///< Human-readable monitor name, when the compositor reports one.
+    int monitor_refresh_mhz = 0;  ///< Refresh rate in mHz, when the compositor reports one.
 
     /**
      * @brief Convert to display name.
@@ -613,6 +615,8 @@ namespace portal {
         for (const auto &monitor : wl_monitors) {
           if (monitor->viewport.offset_x == out_pos_x && monitor->viewport.offset_y == out_pos_y && monitor->viewport.logical_width == out_width && monitor->viewport.logical_height == out_height) {
             stream.monitor_name = monitor->name;
+            stream.monitor_description = monitor->description;
+            stream.monitor_refresh_mhz = monitor->refresh_mhz;
             break;
           }
         }
@@ -821,10 +825,10 @@ namespace platf {
   /**
    * @brief Enumerate capture targets available through xdg-desktop-portal.
    *
-   * @return Portal display names, or an empty list when portal discovery fails.
+   * @return Portal displays with their geometry, or an empty list when portal discovery fails.
    */
-  std::vector<std::string> portal_display_names() {
-    std::vector<std::string> display_names;
+  std::vector<display_info_t> portal_display_infos() {
+    std::vector<display_info_t> infos;
     auto dbus = std::make_shared<portal::dbus_t>();
 
     if (dbus->init() < 0) {
@@ -835,8 +839,8 @@ namespace platf {
     if (has_elevated_privileges(true)) {
       // We're still in the probing phase of Sunshine startup. Dropping portal security early will break KMS.
       // Just return a dummy screen for now. Display re-enumeration after encoder probing will yield full result.
-      display_names.emplace_back("init");
-      return display_names;
+      infos.push_back(display_info_t {.name = "init"});
+      return infos;
     }
 
     if (dbus->connect_to_portal() < 0) {
@@ -846,12 +850,34 @@ namespace platf {
 
     for (auto stream_ : dbus->pipewire_streams) {
       BOOST_LOG(info) << "[portalgrab] Found stream for display id/name: '"sv << stream_.monitor_name << "' position: "sv << stream_.pos_x << "x"sv << stream_.pos_y << " resolution: "sv << stream_.width << "x"sv << stream_.height;
-      display_names.emplace_back(stream_.to_display_name());
+      infos.push_back(display_info_t {
+        .name = stream_.to_display_name(),
+        .description = stream_.monitor_description,
+        .width = (int) stream_.width,
+        .height = (int) stream_.height,
+        .offset_x = (int) stream_.pos_x,
+        .offset_y = (int) stream_.pos_y,
+        // wl_output reports mHz; RefreshRateX100 wants hundredths of a Hz.
+        .refresh_rate_x100 = stream_.monitor_refresh_mhz / 10,
+      });
     }
     // Release the portal session as soon as possible to properly release related resources early.
     dbus.reset();
 
-    // Return currently active display names
+    // Return currently active displays
+    return infos;
+  }
+
+  /**
+   * @brief Enumerate capture targets available through xdg-desktop-portal.
+   *
+   * @return Portal display names, or an empty list when portal discovery fails.
+   */
+  std::vector<std::string> portal_display_names() {
+    std::vector<std::string> display_names;
+    for (auto &info : portal_display_infos()) {
+      display_names.emplace_back(std::move(info.name));
+    }
     return display_names;
   }
 }  // namespace platf

@@ -181,6 +181,7 @@ namespace wl {
 
     viewport.width = width;
     viewport.height = height;
+    refresh_mhz = refresh;
   }
 
   void monitor_t::listen(zxdg_output_manager_v1 *output_manager) {

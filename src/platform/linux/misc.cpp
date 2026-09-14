@@ -1175,6 +1175,7 @@ namespace platf {
    * @return Wayland display names, or an empty list when discovery fails.
    */
   std::vector<std::string> wl_display_names();
+  std::vector<display_info_t> wl_display_infos();
   /**
    * @brief Create a Wayland display capture backend.
    *
@@ -1215,6 +1216,7 @@ namespace platf {
 
 #ifdef SUNSHINE_BUILD_PORTAL
   std::vector<std::string> portal_display_names();
+  std::vector<display_info_t> portal_display_infos();
   std::shared_ptr<display_t> portal_display(mem_type_e hwdevice_type, const std::string &display_name, const video::config_t &config);
 
   bool verify_portal() {
@@ -1232,6 +1234,32 @@ namespace platf {
     return window_system == window_system_e::WAYLAND && kwin_available() && !kwin_display_names().empty();
   }
 #endif
+
+  /**
+   * @brief List the capturable displays along with their geometry.
+   * @details The Wayland and portal backends already work the geometry out while
+   *          enumerating, so those report it. The rest fall through to display_names()
+   *          and return name-only entries, which is still enough for a client to ask
+   *          for a particular display.
+   */
+  std::vector<display_info_t> display_infos(mem_type_e hwdevice_type) {
+#ifdef SUNSHINE_BUILD_WAYLAND
+    if (sources[source::WAYLAND]) {
+      return wl_display_infos();
+    }
+#endif
+#ifdef SUNSHINE_BUILD_PORTAL
+    if (sources[source::PORTAL]) {
+      return portal_display_infos();
+    }
+#endif
+
+    std::vector<display_info_t> infos;
+    for (auto &name : display_names(hwdevice_type)) {
+      infos.push_back(display_info_t {.name = std::move(name)});
+    }
+    return infos;
+  }
 
   /**
    * @brief List display names accepted by the selected capture backend.

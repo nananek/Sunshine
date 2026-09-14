@@ -928,6 +928,32 @@ namespace platf {
   std::vector<std::string> display_names(mem_type_e hwdevice_type);
 
   /**
+   * @brief A capturable display and the geometry needed to describe it to a client.
+   * @details The capture backends already work this out while enumerating; display_names()
+   *          just throws everything but the name away. Multi-display streaming needs the
+   *          rest so a client can lay its windows out like the host's desktop.
+   */
+  struct display_info_t {
+    std::string name;  ///< Capture selector, as accepted by platf::display().
+    std::string description;  ///< Human-readable name, empty when the backend has none.
+    int width {0};  ///< Width in pixels, or 0 when the backend does not report geometry.
+    int height {0};  ///< Height in pixels, or 0 when the backend does not report geometry.
+    int offset_x {0};  ///< Horizontal position within the desktop, when known.
+    int offset_y {0};  ///< Vertical position within the desktop, when known.
+    int refresh_rate_x100 {0};  ///< Refresh rate times 100, or 0 when the backend does not report it.
+  };
+
+  /**
+   * @brief List the capturable displays along with their geometry.
+   * @details Backends that do not report geometry return entries carrying only a name,
+   *          which is still what a client needs to ask for a particular display.
+   *
+   * @param hwdevice_type Hardware device type requested for capture or encode.
+   * @return One entry per display accepted by the selected capture backend.
+   */
+  std::vector<display_info_t> display_infos(mem_type_e hwdevice_type);
+
+  /**
    * @brief Check if GPUs/drivers have changed since the last call to this function.
    * @return `true` if a change has occurred or if it is unknown whether a change occurred.
    */
