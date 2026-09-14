@@ -133,6 +133,13 @@ namespace stream {
     "Short frame header must be 8 bytes"
   );
 
+  // Defined outside this file's #pragma pack, so make the layout assumption explicit:
+  // the client derives its payload offset from this size.
+  static_assert(
+    sizeof(NV_VIDEO_RTP_EXTENSION) == 4,
+    "The video RTP extension must stay 4 bytes"
+  );
+
   /**
    * @brief Packed RTP and video headers for an unencrypted video packet.
    */
@@ -147,7 +154,7 @@ namespace stream {
     }
 
     RTP_PACKET rtp;  ///< RTP header that prefixes this payload.
-    char reserved[4];  ///< Reserved protocol padding bytes.
+    NV_VIDEO_RTP_EXTENSION extension;  ///< Names the video stream this packet belongs to.
 
     NV_VIDEO_PACKET packet;  ///< GameStream video packet header.
   };
@@ -1777,6 +1784,11 @@ namespace stream {
             inspect->rtp.header = 0x80 | FLAG_EXTENSION;
             inspect->rtp.sequenceNumber = util::endian::big<uint16_t>(lowseq + x);
             inspect->rtp.timestamp = util::endian::big<uint32_t>(timestamp);
+
+            // Every stream shares this socket, so each packet has to name its stream.
+            // This is stamped on parity shards too, since FEC does not cover the RTP header.
+            inspect->extension.streamIndex = (std::uint8_t) stream->index;
+            std::fill(std::begin(inspect->extension.reserved), std::end(inspect->extension.reserved), 0);
 
             inspect->packet.multiFecBlocks = (blockIndex << 4) | ((fec_blocks_needed - 1) << 6);
             inspect->packet.frameIndex = (uint32_t) packet->frame_index();
