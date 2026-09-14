@@ -339,9 +339,20 @@ namespace pipewire {
         // Use DMA-BUF for VAAPI, or for CUDA when the display GPU is NVIDIA (pure NVIDIA system).
         // On hybrid GPU systems (Intel+NVIDIA), DMA-BUFs come from the Intel GPU and cannot
         // be imported into CUDA, so we fall back to memory buffers in that case.
+        //
+        // Without CUDA support compiled in there is no encode device that can import a
+        // DMA-BUF: make_avcodec_encode_device() hands back the plain base device, and the
+        // encoder falls back to converting in software. That path reads img.data, which a
+        // DMA-BUF capture never fills, so every frame fails to scale. Ask for memory
+        // buffers rather than hand it an image it cannot read.
+#ifdef SUNSHINE_BUILD_CUDA
+        constexpr bool cuda_imports_dmabuf = true;
+#else
+        constexpr bool cuda_imports_dmabuf = false;
+#endif
         bool use_dmabuf = n_dmabuf_infos > 0 && (mem_type == platf::mem_type_e::vaapi ||
                                                  mem_type == platf::mem_type_e::vulkan ||
-                                                 (mem_type == platf::mem_type_e::cuda && display_is_nvidia));
+                                                 (mem_type == platf::mem_type_e::cuda && display_is_nvidia && cuda_imports_dmabuf));
         if (use_dmabuf) {
           for (int i = 0; i < n_dmabuf_infos; i++) {
             auto format_param = build_format_parameter(&pod_builder, width, height, target_framerate, dmabuf_infos[i].format, dmabuf_infos[i].modifiers, dmabuf_infos[i].n_modifiers);
