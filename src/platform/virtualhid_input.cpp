@@ -20,6 +20,7 @@
 
 // local includes
 #include "src/config.h"
+#include "src/kmd.h"
 #include "src/logging.h"
 #include "virtualhid_input.h"
 
@@ -1152,34 +1153,78 @@ namespace platf {
 #endif
 
   void move_mouse(input_t &input, int deltaX, int deltaY) {
+    if (kmd::enabled()) {
+      kmd::move_mouse(deltaX, deltaY);
+      return;
+    }
+
     virtualhid::move_mouse(virtualhid::get_input_context(input), deltaX, deltaY);
   }
 
   void move_mouse(input_t &input, const touch_port_t &touch_port, int deltaX, int deltaY) {
+    if (kmd::enabled()) {
+      kmd::move_mouse(deltaX, deltaY);
+      return;
+    }
+
     virtualhid::move_mouse(virtualhid::get_input_context(input), touch_port, deltaX, deltaY);
   }
 
   void abs_mouse(input_t &input, const touch_port_t &touch_port, float x, float y) {
+    if (kmd::enabled()) {
+      // The client reports pixels inside the streamed display; the gateway
+      // takes a normalized position.
+      const auto width = static_cast<float>(touch_port.width);
+      const auto height = static_cast<float>(touch_port.height);
+      kmd::abs_mouse(width > 0 ? x / width : 0.5f, height > 0 ? y / height : 0.5f);
+      return;
+    }
+
     virtualhid::abs_mouse(virtualhid::get_input_context(input), touch_port, x, y);
   }
 
   void button_mouse(input_t &input, int button, bool release) {
+    if (kmd::enabled()) {
+      kmd::button(button, release);
+      return;
+    }
+
     virtualhid::button_mouse(virtualhid::get_input_context(input), button, release);
   }
 
   void scroll(input_t &input, int high_res_distance) {
+    if (kmd::enabled()) {
+      kmd::scroll(high_res_distance);
+      return;
+    }
+
     virtualhid::scroll(virtualhid::get_input_context(input), high_res_distance);
   }
 
   void hscroll(input_t &input, int high_res_distance) {
+    if (kmd::enabled()) {
+      // The gateway has no horizontal wheel.
+      return;
+    }
+
     virtualhid::hscroll(virtualhid::get_input_context(input), high_res_distance);
   }
 
   void keyboard_update(input_t &input, uint16_t modcode, bool release, uint8_t flags, bool extended) {
+    if (kmd::enabled()) {
+      kmd::key(modcode, release, flags, extended);
+      return;
+    }
+
     virtualhid::keyboard_update(virtualhid::get_input_context(input), modcode, release, flags, extended);
   }
 
   void unicode(input_t &input, const char *utf8, int size) {
+    if (kmd::enabled()) {
+      kmd::text(utf8, size);
+      return;
+    }
+
     virtualhid::unicode(virtualhid::get_input_context(input), utf8, size);
   }
 
