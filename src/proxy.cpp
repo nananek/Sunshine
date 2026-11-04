@@ -10,6 +10,7 @@
 
 // standard includes
 #include <cerrno>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
@@ -274,10 +275,10 @@ namespace proxy {
   }
 
   void run(safe::mail_t mail, video::config_t config, stream::session_t *channel_data) {
-    (void) channel_data;
-
     auto shutdown = mail->event<bool>(mail::shutdown);
-    auto packets = mail->queue<video::packet_t>(mail::video_packets);
+
+    // The broadcast thread reads the global queue, not the session mailbox.
+    auto packets = mail::man->queue<video::packet_t>(mail::video_packets);
 
     auto touch_port_events = mail->event<input::touch_port_t>(mail::touch_port);
     auto hdr_events = mail->event<video::hdr_info_t>(mail::hdr);
@@ -356,6 +357,8 @@ namespace proxy {
       }
       std::memcpy(packet->av_packet->data, au.data(), au.size());
       packet->av_packet->pts = frame_nr++;
+      packet->channel_data = channel_data;
+      packet->frame_timestamp = std::chrono::steady_clock::now();
       if (keyframe) {
         packet->av_packet->flags |= AV_PKT_FLAG_KEY;
         ++keyframes;
