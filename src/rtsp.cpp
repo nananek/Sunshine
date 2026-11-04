@@ -27,6 +27,7 @@ extern "C" {
 #include "input.h"
 #include "logging.h"
 #include "network.h"
+#include "proxy.h"
 #include "rtsp.h"
 #include "stream.h"
 #include "sync.h"
@@ -1070,6 +1071,13 @@ namespace rtsp_stream {
         }
         args.try_emplace(name, val);
       }
+    }
+
+    // The capture daemon emits fixed 5 ms Opus frames, so the client must be
+    // told 5 ms regardless of what it asked for; Sunshine advances the RTP
+    // timestamp by this value on every packet.
+    if (proxy::enabled()) {
+      args.insert_or_assign("x-nv-aqos.packetDuration"sv, "5"sv);
     }
 
     // Initialize any omitted parameters to defaults

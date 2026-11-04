@@ -12,6 +12,7 @@
 // local includes
 #include "audio.h"
 #include "config.h"
+#include "proxy.h"
 #include "globals.h"
 #include "logging.h"
 #include "platform/common.h"
@@ -156,6 +157,14 @@ namespace audio {
    * @brief Run the capture loop for this backend.
    */
   void capture(safe::mail_t mail, config_t config, stream::session_t *channel_data) {
+    if (proxy::enabled()) {
+      BOOST_LOG(info) << "Audio: packetDuration="sv << config.packetDuration
+                      << "ms channels="sv << config.channels
+                      << " (stream is 5ms stereo from the capture daemon)"sv;
+      proxy::run_audio(std::move(mail), channel_data);
+      return;
+    }
+
     auto shutdown_event = mail->event<bool>(mail::shutdown);
     if (!config::audio.stream) {
       shutdown_event->view();
