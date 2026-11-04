@@ -3298,7 +3298,26 @@ namespace video {
                                                                      encoder.av1[encoder_t::DYNAMIC_RANGE_YUV444];
   }
 
+  /**
+   * @brief Placeholder encoder reported while the stream comes from elsewhere.
+   *
+   * Nothing encodes in proxy mode, but a few code paths inspect the selected
+   * encoder (logging, launch validation), so it must not be null.
+   */
+  encoder_t proxy_encoder {
+    .name = "lgmd"sv,
+  };
+
   int probe_encoders() {
+    if (proxy::enabled()) {
+      // The stream is already encoded by the capture device: there is no
+      // display to capture and no encoder to probe.
+      chosen_encoder = &proxy_encoder;
+      active_hevc_mode = 0;
+      active_av1_mode = 0;
+      return 0;
+    }
+
     if (!allow_encoder_probing()) {
       // Error already logged
       return -1;
