@@ -52,4 +52,12 @@ namespace proxy {
    */
   void run(safe::mail_t mail, video::config_t config, stream::session_t *channel_data);
 
+  /**
+   * @brief Forward Opus packets from the capture daemon to the audio stream.
+   *
+   * @param mail Mailbox shared with the stream threads.
+   * @param channel_data Stream session that owns the mailbox.
+   */
+  void run_audio(safe::mail_t mail, stream::session_t *channel_data);
+
 }  // namespace proxy

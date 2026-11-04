@@ -29,6 +29,7 @@
 // local includes
 #include "src/globals.h"
 #include "src/logging.h"
+#include "src/audio.h"
 #include "src/proxy.h"
 #include "src/video.h"
 
@@ -392,6 +393,133 @@ namespace proxy {
 
     ::close(fd);
     BOOST_LOG(info) << "Proxy video source stopped after "sv << (frame_nr - 1) << " frames ("sv << keyframes << " keyframes)"sv;
+  }
+
+}  // namespace proxy
+
+namespace proxy {
+
+  void run_audio(safe::mail_t mail, stream::session_t *channel_data) {
+    auto shutdown = mail->event<bool>(mail::shutdown);
+    auto packets = mail::man->queue<audio::packet_t>(mail::audio_packets, 1024);
+
+    const auto path = socket_path();
+
+    std::string err;
+    const int fd = connect_unix(path, err);
+    if (fd < 0) {
+      BOOST_LOG(error) << "Cannot reach the capture daemon for audio at "sv << path << ": "sv << err;
+      return;
+    }
+
+    const char *request = "GET /audio.opus HTTP/1.1\r\nHost: lgmd\r\nConnection: close\r\n\r\n";
+    if (::send(fd, request, std::strlen(request), MSG_NOSIGNAL) < 0) {
+      ::close(fd);
+      return;
+    }
+
+    std::string head;
+    std::vector<std::uint8_t> leftover;
+    if (!read_head(fd, head, leftover, err)) {
+      BOOST_LOG(error) << "Capture daemon (audio): "sv << err;
+      ::close(fd);
+      return;
+    }
+    if (head.find(" 200 ") == std::string::npos) {
+      BOOST_LOG(info) << "Capture daemon has no audio stream, continuing without audio"sv;
+      ::close(fd);
+      return;
+    }
+    if (head.find("chunked") == std::string::npos) {
+      BOOST_LOG(error) << "Capture daemon did not send a chunked audio body"sv;
+      ::close(fd);
+      return;
+    }
+
+    ChunkedDecoder decoder;
+    if (!leftover.empty()) {
+      decoder.push(leftover.data(), leftover.size());
+    }
+
+    std::vector<std::uint8_t> pending;
+    std::uint8_t chunk[kReadBuffer];
+    std::uint64_t frames = 0;
+    auto rate_mark = std::chrono::steady_clock::now();
+    std::uint64_t rate_frames = 0;
+    auto raise_time = std::chrono::steady_clock::duration::zero();
+    std::uint64_t raise_failed = 0;
+
+    // Fill pending with at least n bytes of payload.
+    auto fill = [&](std::size_t n) -> bool {
+      while (pending.size() < n) {
+        if (shutdown->peek()) {
+          return false;
+        }
+        const auto r = read_some(fd, chunk, sizeof(chunk), 200);
+        if (r == 0) {
+          continue;
+        }
+        if (r < 0) {
+          return false;
+        }
+        decoder.push(chunk, static_cast<std::size_t>(r));
+        std::vector<std::uint8_t> body;
+        if (!decoder.drain(body) && body.empty()) {
+          return false;
+        }
+        pending.insert(pending.end(), body.begin(), body.end());
+      }
+      return true;
+    };
+
+    BOOST_LOG(info) << "Streaming audio from "sv << path;
+
+    while (!shutdown->peek()) {
+      if (!fill(4)) {
+        break;
+      }
+      const std::uint32_t len = static_cast<std::uint32_t>(pending[0]) |
+                                (static_cast<std::uint32_t>(pending[1]) << 8) |
+                                (static_cast<std::uint32_t>(pending[2]) << 16) |
+                                (static_cast<std::uint32_t>(pending[3]) << 24);
+      pending.erase(pending.begin(), pending.begin() + 4);
+
+      if (len == 0 || len > 8192) {
+        BOOST_LOG(error) << "Capture daemon sent an invalid audio packet length: "sv << len;
+        break;
+      }
+      if (!fill(len)) {
+        break;
+      }
+
+      audio::buffer_t packet {static_cast<std::size_t>(len)};
+      std::memcpy(std::begin(packet), pending.data(), len);
+      pending.erase(pending.begin(), pending.begin() + static_cast<std::ptrdiff_t>(len));
+
+      const auto raise_start = std::chrono::steady_clock::now();
+      const bool queued = packets->raise(channel_data, std::move(packet));
+      raise_time += std::chrono::steady_clock::now() - raise_start;
+      if (!queued) {
+        ++raise_failed;
+      }
+      ++frames;
+
+      if (++rate_frames == 1000) {
+        const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                          std::chrono::steady_clock::now() - rate_mark).count();
+        BOOST_LOG(info) << "audio: "sv << rate_frames << " packets in "sv << ms << " ms => "sv
+                        << (ms > 0 ? (rate_frames * 1000 / static_cast<std::uint64_t>(ms)) : 0) << "/s, raise="sv
+                        << std::chrono::duration_cast<std::chrono::milliseconds>(raise_time).count() << "ms, failed="sv
+                        << raise_failed;
+        raise_time = std::chrono::steady_clock::duration::zero();
+        raise_failed = 0;
+        rate_frames = 0;
+        rate_mark = std::chrono::steady_clock::now();
+      }
+    }
+
+    ::close(fd);
+    BOOST_LOG(info) << "Proxy audio source stopped after "sv << frames << " packets"sv;
   }
 
 }  // namespace proxy

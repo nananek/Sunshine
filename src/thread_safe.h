@@ -839,14 +839,14 @@ namespace safe {
      * @return Typed queue channel associated with the supplied identifier.
      */
     template<class T>
-    queue_t<T> queue(const std::string_view &id) {
+    queue_t<T> queue(const std::string_view &id, std::uint32_t max_elements = 32) {
       std::lock_guard lg {mutex};
 
       if (auto it = id_to_post.find(id); it != std::end(id_to_post)) {
         return lock<queue_t<T>>(it->second);
       }
 
-      auto post = std::make_shared<typename queue_t<T>::element_type>(shared_from_this(), 32);
+      auto post = std::make_shared<typename queue_t<T>::element_type>(shared_from_this(), max_elements);
       id_to_post.try_emplace(std::string {id}, post);
 
       return post;

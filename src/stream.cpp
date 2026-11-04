@@ -1932,7 +1932,7 @@ namespace stream {
    */
   void audioBroadcastThread(udp::socket &sock) {
     auto shutdown_event = mail::man->event<bool>(mail::broadcast_shutdown);
-    auto packets = mail::man->queue<audio::packet_t>(mail::audio_packets);
+    auto packets = mail::man->queue<audio::packet_t>(mail::audio_packets, 1024);
 
     audio_packet_t audio_packet;
     fec::rs_t rs {reed_solomon_new(RTPA_DATA_SHARDS, RTPA_FEC_SHARDS)};
@@ -1945,6 +1945,12 @@ namespace stream {
     // constant and known in advance.
     constexpr std::array<unsigned char, 8> parity {0x77, 0x40, 0x38, 0x0e, 0xc7, 0xa7, 0x0d, 0x6c};
     memcpy(rs.get()->p, parity.data(), parity.size());
+
+    std::uint64_t audio_sent = 0;
+    auto audio_rate_mark = std::chrono::steady_clock::now();
+    auto pop_wait = std::chrono::steady_clock::duration::zero();
+    auto work_time = std::chrono::steady_clock::duration::zero();
+    auto last_pop = std::chrono::steady_clock::now();
 
     audio_packet.rtp.header = 0x80;
     audio_packet.rtp.packetType = 97;
@@ -1961,6 +1967,10 @@ namespace stream {
 
       TUPLE_2D_REF(channel_data, packet_data, *packet);
       auto *session = channel_data;
+
+      const auto now_mark = std::chrono::steady_clock::now();
+      pop_wait += now_mark - last_pop;
+      last_pop = now_mark;
 
       auto sequenceNumber = session->audio.sequenceNumber;
       auto timestamp = session->audio.timestamp;
@@ -1982,6 +1992,22 @@ namespace stream {
 
       session->audio.sequenceNumber++;
       session->audio.timestamp += session->config.audio.packetDuration;
+
+      work_time += std::chrono::steady_clock::now() - now_mark;
+
+      if (++audio_sent % 1000 == 0) {
+        const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                          std::chrono::steady_clock::now() - audio_rate_mark).count();
+        BOOST_LOG(info) << "audio tx: "sv << audio_sent << " packets in "sv << ms << " ms => "sv
+                        << (ms > 0 ? (audio_sent * 1000 / static_cast<std::uint64_t>(ms)) : 0) << "/s, last="sv
+                        << packet_data.size() << " bytes, pop_wait="sv
+                        << std::chrono::duration_cast<std::chrono::milliseconds>(pop_wait).count() << "ms work="sv
+                        << std::chrono::duration_cast<std::chrono::milliseconds>(work_time).count() << "ms"sv;
+        audio_rate_mark = std::chrono::steady_clock::now();
+        pop_wait = std::chrono::steady_clock::duration::zero();
+        work_time = std::chrono::steady_clock::duration::zero();
+        last_pop = std::chrono::steady_clock::now();
+      }
 
       auto peer_address = session->audio.peer.address();
       try {

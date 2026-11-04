@@ -1073,11 +1073,9 @@ namespace rtsp_stream {
       }
     }
 
-    // The capture daemon emits fixed 5 ms Opus frames, so the client must be
-    // told 5 ms regardless of what it asked for; Sunshine advances the RTP
-    // timestamp by this value on every packet.
     if (proxy::enabled()) {
-      args.insert_or_assign("x-nv-aqos.packetDuration"sv, "5"sv);
+      BOOST_LOG(info) << "Client requested audio packet duration: "sv
+                      << args.at("x-nv-aqos.packetDuration"sv);
     }
 
     // Initialize any omitted parameters to defaults
