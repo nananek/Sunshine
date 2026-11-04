@@ -32,6 +32,7 @@
 #include "logging.h"
 #include "network.h"
 #include "nvhttp.h"
+#include "proxy.h"
 #include "platform/common.h"
 #include "process.h"
 #include "rtsp.h"
@@ -1201,6 +1202,12 @@ namespace nvhttp {
   }
 
   uint32_t get_codec_mode_flags() {
+    // The proxy source carries whatever the capture device encoded, which is
+    // H.264 only, so do not offer codecs the stream cannot satisfy.
+    if (proxy::enabled()) {
+      return SCM_H264;
+    }
+
     uint32_t codec_mode_flags = SCM_H264;
     if (video::last_encoder_probe_supported_yuv444_for_codec[0]) {
       codec_mode_flags |= SCM_H264_HIGH8_444;

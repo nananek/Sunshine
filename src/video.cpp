@@ -33,6 +33,7 @@ extern "C" {
 #include "logging.h"
 #include "nvenc/nvenc_encoder.h"
 #include "platform/common.h"
+#include "proxy.h"
 #include "sync.h"
 #include "video.h"
 
@@ -2968,6 +2969,11 @@ namespace video {
     config_t config,
     stream::session_t *channel_data
   ) {
+    if (proxy::enabled()) {
+      proxy::run(std::move(mail), config, channel_data);
+      return;
+    }
+
     config = resolve_dynamic_range(*chosen_encoder, config);
 
     auto idr_events = mail->event<bool>(mail::idr);
