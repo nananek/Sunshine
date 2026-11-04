@@ -367,6 +367,8 @@ namespace kmd {
       }
     }
 
+    void touch_pointer_locked();
+
     void enqueue_locked(std::string line) {
       start_worker_locked();
 
@@ -381,7 +383,8 @@ namespace kmd {
      * @brief Queue the current key set as one snapshot report.
      */
     void sync_keys_locked() {
-      std::string line = "{\"op\":\"key\",\"hold\":true,\"hold_ms\":0,\"chord\":[";
+      // hold_ms 0 はゲートウェイが bad_value で拒否する。1 が最小。
+      std::string line = "{\"op\":\"key\",\"hold\":true,\"hold_ms\":1,\"chord\":[";
       bool first = true;
       for (const auto &name : held_keys) {
         if (!first) {
@@ -392,6 +395,16 @@ namespace kmd {
         line += '"';
         first = false;
       }
+      if (held_keys.empty()) {
+        // 空の chord も受け付けないので、最後のキーは全解放で離す。
+        enqueue_locked("{\"op\":\"release_all\"}");
+        if (!held_button.empty()) {
+          // 全解放で落ちたボタンを押し直す。
+          touch_pointer_locked();
+        }
+        return;
+      }
+
       line += "]}";
       enqueue_locked(std::move(line));
     }
