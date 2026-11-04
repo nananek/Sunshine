@@ -1,0 +1,19 @@
+[Unit]
+Description=Sunshine streaming host (lgmd proxy source)
+Documentation=https://github.com/nananek/sunshine/tree/lgmd-proxy
+After=network-online.target lgmd.service serial-kmd.service
+Wants=lgmd.service serial-kmd.service
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+Type=simple
+# 映像は lgmd のパススルー、入力は serial-kmd 経由で KVM ゲートウェイへ。
+Environment=SUNSHINE_LGMD_SOCKET=%t/lgmd.sock
+Environment=SUNSHINE_KMD_SOCKET=%t/serial-kmd.sock
+ExecStart=%h/repos/sunshine-lgm/build/sunshine
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=default.target
